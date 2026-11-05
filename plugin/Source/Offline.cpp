@@ -3,6 +3,8 @@
 namespace ss
 {
 
+static juce::String U8 (const char* s) { return juce::String::fromUTF8 (s); }
+
 static constexpr uint32_t kIrSeed = 90210;
 
 SourceView makeView (const SampleData& d, int a, int b) noexcept
@@ -220,7 +222,7 @@ void Exporter::run()
     const double rate = view.sampleRate;
     int64_t frames; int channels; double r;
     estimate (job, frames, channels, r);
-    if (frames * 2 > kMaxSamples) { finish (Failed, "output too long — select a shorter region or lower the stretch"); return; }
+    if (frames * 2 > kMaxSamples) { finish (Failed, U8 ("output too long — select a shorter region or lower the stretch")); return; }
 
     StretchStream stream;
     stream.prepare (rate);
@@ -284,9 +286,9 @@ void Exporter::run()
     const float outDb = juce::Decibels::gainToDecibels (peak * gain, -100.0f);
     const auto sizeMB = juce::String ((double) outFile.getSize() / 1048576.0, 1) + " MB";
     if (outDb > 0.01f && bitDepth != 32)
-        finish (Done, "saved " + outFile.getFileName() + " · clipped by " + juce::String (outDb, 1) + " dB (lower GAIN)");
+        finish (Done, "saved " + outFile.getFileName() + U8 (" · clipped by ") + juce::String (outDb, 1) + " dB (lower GAIN)");
     else
-        finish (Done, "saved " + outFile.getFileName() + " · " + sizeMB);
+        finish (Done, "saved " + outFile.getFileName() + U8 (" · ") + sizeMB);
 }
 
 } // namespace ss

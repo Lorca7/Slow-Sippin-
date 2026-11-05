@@ -43,7 +43,7 @@ inline const std::vector<ToggleSpec>& toggleSpecs()
 {
     static const std::vector<ToggleSpec> specs {
         { "normalize",  "NORMALIZE",     true  },
-        { "monoStereo", "MONO > STEREO", true  },
+        { "monoStereo", "MONO → STEREO", true  },
         { "reverse",    "REVERSE",       false },
         { "loop",       "LOOP",          false },
         { "keyTrack",   "KEY TRACK",     true  },
@@ -112,7 +112,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
             layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { c.id, 1 }, c.label, specRange (c), c.def, attrs));
     }
     for (const auto& t : toggleSpecs())
-        layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { t.id, 1 }, t.label, t.def));
+        layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { t.id, 1 }, juce::String::fromUTF8 (t.label), t.def));
     return layout;
 }
 

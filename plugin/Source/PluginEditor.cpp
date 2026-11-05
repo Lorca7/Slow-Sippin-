@@ -2,6 +2,8 @@
 
 using namespace ss;
 
+static juce::String U8 (const char* s) { return juce::String::fromUTF8 (s); }
+
 namespace
 {
 juce::String fmtDur (double sec)
@@ -86,7 +88,7 @@ void SourceWave::paint (juce::Graphics& g)
         g.drawText (proc.isLoading() ? "LOADING..." : "DROP A SAMPLE", r.translated (0, -10), juce::Justification::centred);
         g.setColour (Colours::muted);
         g.setFont (Fonts::mono (12.0f));
-        g.drawText ("WAV · AIFF · MP3 · FLAC", r.translated (0, 14), juce::Justification::centred);
+        g.drawText (U8 ("WAV · AIFF · MP3 · FLAC"), r.translated (0, 14), juce::Justification::centred);
     }
     else
     {
@@ -431,7 +433,7 @@ SlowSippinEditor::SlowSippinEditor (SlowSippinProcessor& p)
 
     for (const auto& t : toggleSpecs())
     {
-        auto* b = toggles.add (new juce::ToggleButton (t.label));
+        auto* b = toggles.add (new juce::ToggleButton (juce::String::fromUTF8 (t.label)));
         addAndMakeVisible (b);
         if (auto* prm = proc.apvts.getParameter (t.id))
             toggleAtts.add (new juce::ButtonParameterAttachment (*prm, *b));
@@ -467,8 +469,8 @@ void SlowSippinEditor::resized()
 
     {
         auto h = header.reduced (40, 0);
-        auto b = h.removeFromRight (juce::jmax (420, h.getWidth() / 2)).withSizeKeepingCentre (juce::jmax (420, h.getWidth() / 2), 42);
-        loadBtn.setBounds (b.removeFromLeft (140));
+        const int x = h.getX() + juce::jmax (500, (int) (h.getWidth() * 0.40f));
+        loadBtn.setBounds (x, h.getCentreY() - 21, 140, 42);
     }
 
     {
@@ -539,15 +541,16 @@ void SlowSippinEditor::paint (juce::Graphics& g)
     g.setFont (Fonts::mono (11.5f, Fonts::Regular, 0.12f));
     g.drawText ("TIME-STRETCH", h.getX() + (int) tw + 30, h.getCentreY() - 16, 240, 16, juce::Justification::centredLeft);
     g.setFont (Fonts::mono (11.5f));
-    g.drawText ("textures · pads · drones", h.getX() + (int) tw + 30, h.getCentreY(), 240, 16, juce::Justification::centredLeft);
+    g.drawText (U8 ("textures · pads · drones"), h.getX() + (int) tw + 30, h.getCentreY(), 240, 16, juce::Justification::centredLeft);
 
     const int infoX = loadBtn.getRight() + 22;
-    auto statusR = juce::Rectangle<int> (h.getRight() - 260, h.getY(), 260, h.getHeight());
+    const int statusW = juce::jlimit (90, 360, (int) juce::GlyphArrangement::getStringWidth (Fonts::mono (12.0f), statusShown) + 30);
+    auto statusR = juce::Rectangle<int> (h.getRight() - statusW, h.getY(), statusW, h.getHeight());
     auto d = proc.getSample();
     g.setFont (Fonts::mono (13.0f));
     juce::String info;
     if (d != nullptr)
-        info << d->name << "  ·  " << juce::String ((int) d->sampleRate) << " Hz · " << d->numChannels << "ch · " << juce::String (d->seconds(), 2) << "s";
+        info << d->name << U8 ("  ·  ") << juce::String ((int) d->sampleRate) << U8 (" Hz · ") << d->numChannels << U8 ("ch · ") << juce::String (d->seconds(), 2) << "s";
     else
         info = proc.isLoading() ? "loading..." : "no sample - drop a file anywhere, or click + SAMPLE";
     g.setColour (d != nullptr ? Colours::ink2 : Colours::muted);
@@ -567,8 +570,8 @@ void SlowSippinEditor::paint (juce::Graphics& g)
     // hints
     g.setFont (Fonts::mono (12.0f));
     g.setColour (Colours::muted);
-    g.drawText ("drag = select · click = point · dbl-click = clear", srcHint, juce::Justification::centredLeft);
-    g.drawFittedText ("click the output to set the start point · space = play/stop", outHint, juce::Justification::centredLeft, 2);
+    g.drawText (U8 ("drag = select · click = point · dbl-click = clear"), srcHint, juce::Justification::centredLeft);
+    g.drawFittedText (U8 ("click the output to set the start point · space = play/stop"), outHint, juce::Justification::centredLeft, 2);
 
     // legend
     g.setColour (Colours::red);
@@ -595,15 +598,15 @@ void SlowSippinEditor::paint (juce::Graphics& g)
     if (d != nullptr)
     {
         const auto v = ss::makeView (*d, s.regionA, s.regionB);
-        stat ("SOURCE", fmtDur (v.len / v.sampleRate) + " · " + juce::String (v.len) + " smp", cw + 30, false);
+        stat ("SOURCE", fmtDur (v.len / v.sampleRate) + U8 (" · ") + juce::String (v.len) + " smp", cw + 30, false);
         const bool looping = proc.apvts.getRawParameterValue ("loop")->load() > 0.5f;
-        stat ("> OUTPUT", fmtDur (outputSeconds (s)) + " · 2ch" + (looping ? juce::String (" · loop") : juce::String()), cw, true);
+        stat (U8 ("→ OUTPUT"), fmtDur (outputSeconds (s)) + U8 (" · 2ch") + (looping ? juce::String (U8 (" · loop")) : juce::String()), cw, true);
         stat ("MEMORY", fmtMB ((double) d->length * d->numChannels * 8), cw - 30, false);
     }
     else
     {
         stat ("SOURCE", "-", cw + 30, false);
-        stat ("> OUTPUT", "-", cw, true);
+        stat (U8 ("→ OUTPUT"), "-", cw, true);
         stat ("MEMORY", "0.0 MB", cw - 30, false);
     }
 
@@ -617,7 +620,7 @@ void SlowSippinEditor::paint (juce::Graphics& g)
     juce::String est = "-";
     if (frames > 0)
     {
-        est = fmtDur ((double) frames / rate) + " · " + juce::String (ch) + "ch · " + fmtMB ((double) frames * ch * bitsBox.getSelectedId() / 8.0);
+        est = fmtDur ((double) frames / rate) + U8 (" · ") + juce::String (ch) + U8 ("ch · ") + fmtMB ((double) frames * ch * bitsBox.getSelectedId() / 8.0);
         if (frames * 2 > Exporter::kMaxSamples) est = "too long to render to a file - select a shorter region";
     }
     g.setColour (frames * 2 > Exporter::kMaxSamples ? Colours::red : Colours::muted);
