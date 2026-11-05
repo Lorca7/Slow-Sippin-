@@ -77,7 +77,7 @@ private:
     juce::Slider slider;
     NumberBox box;
     double shown = std::numeric_limits<double>::quiet_NaN();
-    bool dragging = false, updating = false;
+    bool dragging = false, updating = false, edited = false;
 };
 
 } // namespace ss

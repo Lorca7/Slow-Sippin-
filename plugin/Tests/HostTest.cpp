@@ -151,6 +151,51 @@ int main (int argc, char** argv)
     juce::MidiBuffer allOff; allOff.addEvent (juce::MidiMessage::allNotesOff (1), 0);
     render (*inst, 0.5, allOff);
 
+    std::printf ("reverb only adds (never turns the dry sound down):\n");
+    {
+        juce::MidiBuffer held; held.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 0);
+        setParam (*inst, "NORMALIZE", 0.0f);
+        setParam (*inst, "REVERB", 0.0f);
+        render (*inst, 1.0, held);
+        const auto dry = render (*inst, 2.0);
+        setParam (*inst, "REVERB", 100.0f);
+        render (*inst, 0.5);
+        const auto both = render (*inst, 2.0);
+        check (both.rms >= dry.rms * 0.98, "rms with reverb " + juce::String (both.rms, 3) + " >= dry " + juce::String (dry.rms, 3));
+        setParam (*inst, "REVERB", 0.0f);
+        setParam (*inst, "NORMALIZE", 1.0f);
+        render (*inst, 0.3, allOff);
+    }
+
+    std::printf ("parameters are independent:\n");
+    {
+        const juce::StringArray ours { "STRETCH", "PITCH", "WEAVE", "SCATTER", "DRIFT", "REVERB", "SIZE", "GAIN", "ATTACK", "RELEASE",
+                                       "NORMALIZE", juce::String::fromUTF8 ("MONO → STEREO"), "REVERSE", "LOOP", "KEY TRACK" };
+        juce::Array<juce::AudioProcessorParameter*> ps;
+        for (auto* prm : inst->getParameters()) if (ours.contains (prm->getName (64))) ps.add (prm);
+        check (ps.size() == ours.size(), "found all " + juce::String (ours.size()) + " parameters (" + juce::String (ps.size()) + ")");
+        std::vector<float> orig;
+        for (auto* prm : ps) orig.push_back (prm->getValue());
+        int coupled = 0;
+        for (int i = 0; i < ps.size(); ++i)
+        {
+            std::vector<float> before;
+            for (auto* prm : ps) before.push_back (prm->getValue());
+            ps[i]->setValueNotifyingHost (std::fmod (before[(size_t) i] + 0.37f, 1.0f));
+            render (*inst, 0.05);
+            pump (60);
+            for (int j = 0; j < ps.size(); ++j)
+                if (j != i && std::abs (ps[j]->getValue() - before[(size_t) j]) > 1e-6f)
+                {
+                    ++coupled;
+                    std::printf ("    changing %s moved %s\n", ps[i]->getName (64).toRawUTF8(), ps[j]->getName (64).toRawUTF8());
+                }
+        }
+        check (coupled == 0, "changing any one parameter leaves all the others untouched");
+        for (int i = 0; i < ps.size(); ++i) ps[i]->setValueNotifyingHost (orig[(size_t) i]);
+        render (*inst, 0.1);
+    }
+
     std::printf ("offline bounce (non-realtime):\n");
     inst->setNonRealtime (true);
     std::vector<float> w2;
@@ -213,6 +258,39 @@ int main (int argc, char** argv)
             while (ex.isBusy()) juce::Thread::sleep (20);
             check (ex.state() == ss::Exporter::Done && f.getSize() > 1000, juce::String (name) + ": " + ex.message());
         }
+    }
+
+    // --- optional: very long renders (hour-long, and > 4 GB as RF64)
+    for (int a = 4; a < argc && data != nullptr; ++a)
+    {
+        const juce::String mode (argv[a]);
+        if (mode != "--long" && mode != "--huge") continue;
+        const bool huge = mode == "--huge";
+        ss::OfflineSettings os;
+        os.data = data;
+        os.stream.stretch = huge ? 2200.0 : 600.0;      // 6 s source -> 1 h, or ~3.7 h
+        os.stream.scatter = 1; os.stream.weave = 4;
+        os.reverbPct = 30.0f; os.sizeSec = 3.0f;
+        int64_t frames; int ch; double rate;
+        ss::Exporter::estimate (os, frames, ch, rate);
+        std::printf ("%s render: %.2f hours, %d ch\n", huge ? "huge" : "long", frames / rate / 3600.0, ch);
+        ss::Exporter ex;
+        const auto f = outDir.getChildFile (huge ? "huge32.wav" : "hour24.wav");
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        ex.start (os, f, 0, huge ? 32 : 24);
+        int lastPct = -1;
+        while (ex.isBusy())
+        {
+            juce::Thread::sleep (200);
+            const int pct = (int) (ex.progress() * 10);
+            if (pct != lastPct) { lastPct = pct; std::printf ("    %d%%\n", pct * 10); std::fflush (stdout); }
+        }
+        const double secs = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
+        check (ex.state() == ss::Exporter::Done, ex.message() + " in " + juce::String (secs, 0) + " s");
+        juce::String status = juce::File ("/proc/self/status").loadFileAsString();
+        for (auto line : juce::StringArray::fromLines (status))
+            if (line.startsWith ("VmHWM")) std::printf ("    peak memory of this test process: %s\n", line.fromFirstOccurrenceOf (":", false, false).trim().toRawUTF8());
+        check (! f.getSiblingFile ("." + f.getFileName() + ".slowsippin-tmp").exists(), "temporary file removed");
     }
 
     std::printf (failures ? "\n%d FAILURE(S)\n" : "\nall host tests passed\n", failures);

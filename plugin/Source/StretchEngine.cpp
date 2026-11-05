@@ -385,9 +385,11 @@ void StretchStream::nextGrain (const SourceView& src, const StreamSettings& st) 
         pos = std::fmod (pos, (double) len);
         if (pos < 0) pos += len;
     }
-    else if (pos > len + 0.5 * N * srcScale)
+    else if (pos >= len)
     {
-        // played to the end: let the last grain ring out, then stop
+        // reached the end of the region: let the last grain ring out (N/2), then stop.
+        // (Waiting for the window to clear the end would add N/2 × stretch of fade -
+        //  51 s at 600× - and make the output longer than region × stretch.)
         endAt = nextStart - hop + N;
         return;
     }

@@ -171,8 +171,8 @@ void SlowSippinProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     // post: reverb → normalize → gain → (limiter)
     const bool normalize = param ("normalize") > 0.5f;
     const float a = param ("reverb") / 100.0f;
-    sDry.setTargetValue (std::cos (a * juce::MathConstants<float>::halfPi));
-    sWet.setTargetValue (std::sin (a * juce::MathConstants<float>::halfPi));
+    sDry.setTargetValue (1.0f);          // REVERB only adds reverb; it never turns the dry sound down
+    sWet.setTargetValue (a);
     sGain.setTargetValue (juce::Decibels::decibelsToGain (param ("gain"), -100.0f));
     const float pk = analyzer.peak();
     sNorm.setTargetValue (normalize && pk > 1e-6f ? juce::jmin (100.0f, kNormTarget / pk) : 1.0f);

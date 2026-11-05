@@ -4,6 +4,12 @@
  *               which drives NORMALIZE while playing.
  *   Exporter  — renders the whole one-shot (region × stretch, plus reverb
  *               tail) and writes WAV / AIFF at 16 (dithered), 24 or 32-bit float.
+ *
+ * The exporter streams: the stretch is rendered in blocks, the reverb is a
+ * streaming block convolution, and the result goes to a temporary 32-bit
+ * float file while the peak is measured. A second pass applies normalize +
+ * gain and writes the final file. Memory use is constant, so hour-long
+ * (or longer) renders are fine; WAV over 4 GB is written as RF64.
  */
 #pragma once
 
@@ -16,9 +22,40 @@ namespace ss
 
 SourceView makeView (const SampleData& d, int a, int b) noexcept;
 
-/** Write interleaved PCM. format: 0 = WAV, 1 = AIFF. bits: 16 | 24 | 32 (float). */
+/** Streaming PCM file writer. format: 0 = WAV (RF64 if > 4 GB), 1 = AIFF. bits: 16 | 24 | 32 (float). */
+class PcmWriter
+{
+public:
+    bool open (const juce::File& f, int format, int bits, int channels, uint64_t frames, double sampleRate, juce::String& error);
+    /** Interleaved frames; scaled by gain, dithered at 16-bit. */
+    bool write (const float* interleaved, size_t frames, float gain);
+    bool close (juce::String& error);
+
+private:
+    std::unique_ptr<juce::FileOutputStream> out;
+    int fmt = 0, bits = 24, ch = 2, bps = 3;
+    std::vector<uint8_t> buf;
+    Rng rng { 0x1234567u };
+};
+
+/** Convenience: write whole channels at once (used by tests). */
 bool writeAudioFile (const juce::File& f, int format, int bits, const std::vector<const float*>& chans,
                      size_t frames, double sampleRate, float gain, juce::String& error);
+
+/** Streaming FFT convolution: feed fixed-size blocks, get the aligned convolved block back. */
+class StreamConvolver
+{
+public:
+    void prepare (const std::vector<float>& ir);
+    int blockSize() const noexcept { return B; }
+    /** in/out: blockSize() samples. */
+    void process (const float* in, float* out);
+
+private:
+    int n = 0, B = 0, H = 0;
+    RealFFT fft;
+    std::vector<double> hr, hi, xr, xi, buf, acc;
+};
 
 struct OfflineSettings
 {
@@ -55,12 +92,14 @@ public:
     enum State { Idle, Running, Done, Failed, Cancelled };
 
     Exporter() : juce::Thread ("Slow Sippin export") {}
-    ~Exporter() override { stopThread (5000); }
+    ~Exporter() override { stopThread (10000); }
 
-    static constexpr int64_t kMaxSamples = 64LL * 1024 * 1024;
+    /** Longest render accepted: 12 hours. */
+    static constexpr double kMaxSeconds = 12.0 * 3600.0;
 
     /** Output frames/channels a job would produce (for the UI estimate). */
     static void estimate (const OfflineSettings& s, int64_t& frames, int& channels, double& rate);
+    static bool tooLong (int64_t frames, double rate) { return rate > 0 && (double) frames / rate > kMaxSeconds; }
 
     bool start (const OfflineSettings& s, const juce::File& file, int format, int bits);
     void cancel() { signalThreadShouldExit(); }

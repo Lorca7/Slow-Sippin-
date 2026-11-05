@@ -24,8 +24,9 @@ SourceView makeView (const SampleData& d, int a, int b) noexcept
     return v;
 }
 
-// --------------------------------------------------------------- writer --
+// ============================================================ PcmWriter
 
+static void put64 (juce::OutputStream& o, uint64_t v) { o.writeInt64 ((juce::int64) v); }
 static void put32 (juce::OutputStream& o, uint32_t v, bool le) { le ? o.writeInt ((int) v) : o.writeIntBigEndian ((int) v); }
 static void put16 (juce::OutputStream& o, uint16_t v, bool le) { le ? o.writeShort ((short) v) : o.writeShortBigEndian ((short) v); }
 
@@ -40,24 +41,39 @@ static void putExt80 (juce::OutputStream& o, double v)
     o.writeIntBigEndian ((int) lo);
 }
 
-bool writeAudioFile (const juce::File& f, int format, int bits, const std::vector<const float*>& chans,
-                     size_t frames, double sampleRate, float gain, juce::String& error)
+bool PcmWriter::open (const juce::File& f, int format, int bitDepth, int channels, uint64_t frames, double sampleRate, juce::String& error)
 {
-    const int ch = (int) chans.size();
-    const int bps = bits / 8;
-    const uint64_t dataLen = (uint64_t) frames * (uint64_t) ch * (uint64_t) bps;
-    if (dataLen + 128 > 0xFFFFFFFFull) { error = "file would be larger than 4 GB"; return false; }
+    fmt = format;
+    bits = bitDepth;
+    ch = channels;
+    bps = bits / 8;
+    const uint64_t dataLen = frames * (uint64_t) ch * (uint64_t) bps;
+    const bool big = dataLen + 1024 > 0xFFFFFFFFull;
+    if (big && fmt == 1) { error = "AIFF files can't be larger than 4 GB - choose WAV for a render this long"; return false; }
 
     f.deleteFile();
-    juce::FileOutputStream o (f, 1 << 20);
-    if (! o.openedOk()) { error = "cannot write " + f.getFullPathName(); return false; }
-
-    const bool wav = format == 0;
+    out = std::make_unique<juce::FileOutputStream> (f, 1 << 20);
+    if (! out->openedOk()) { error = "cannot write " + f.getFullPathName(); out.reset(); return false; }
+    auto& o = *out;
     const bool isFloat = bits == 32;
     const int sr = (int) std::lround (sampleRate);
-    if (wav)
+
+    if (fmt == 0)
     {
-        o.write ("RIFF", 4); put32 (o, (uint32_t) (36 + dataLen), true); o.write ("WAVE", 4);
+        if (big)
+        {
+            // RF64 (EBU Tech 3306): WAV with 64-bit sizes in a ds64 chunk
+            o.write ("RF64", 4); put32 (o, 0xFFFFFFFFu, true); o.write ("WAVE", 4);
+            o.write ("ds64", 4); put32 (o, 28, true);
+            put64 (o, 4 + (8 + 28) + (8 + 16) + 8 + dataLen);   // RIFF size
+            put64 (o, dataLen);
+            put64 (o, frames);
+            put32 (o, 0, true);
+        }
+        else
+        {
+            o.write ("RIFF", 4); put32 (o, (uint32_t) (36 + dataLen), true); o.write ("WAVE", 4);
+        }
         o.write ("fmt ", 4); put32 (o, 16, true);
         put16 (o, isFloat ? 3 : 1, true);
         put16 (o, (uint16_t) ch, true);
@@ -65,7 +81,7 @@ bool writeAudioFile (const juce::File& f, int format, int bits, const std::vecto
         put32 (o, (uint32_t) (sr * ch * bps), true);
         put16 (o, (uint16_t) (ch * bps), true);
         put16 (o, (uint16_t) bits, true);
-        o.write ("data", 4); put32 (o, (uint32_t) dataLen, true);
+        o.write ("data", 4); put32 (o, big ? 0xFFFFFFFFu : (uint32_t) dataLen, true);
     }
     else
     {
@@ -86,50 +102,108 @@ bool writeAudioFile (const juce::File& f, int format, int bits, const std::vecto
         }
         o.write ("SSND", 4); put32 (o, (uint32_t) (8 + dataLen), false); put32 (o, 0, false); put32 (o, 0, false);
     }
-
-    Rng rng (0x1234567u);
-    const size_t chunk = 1 << 16;
-    juce::HeapBlock<uint8_t> buf (chunk * (size_t) ch * (size_t) bps);
-    for (size_t f0 = 0; f0 < frames; f0 += chunk)
-    {
-        const size_t f1 = std::min (frames, f0 + chunk);
-        uint8_t* p = buf.get();
-        for (size_t i = f0; i < f1; ++i)
-        {
-            for (int c = 0; c < ch; ++c)
-            {
-                const double v = (double) chans[(size_t) c][i] * gain;
-                if (isFloat)
-                {
-                    uint32_t u;
-                    const float fv = (float) v;
-                    std::memcpy (&u, &fv, 4);
-                    if (wav) { p[0] = (uint8_t) u; p[1] = (uint8_t) (u >> 8); p[2] = (uint8_t) (u >> 16); p[3] = (uint8_t) (u >> 24); }
-                    else     { p[3] = (uint8_t) u; p[2] = (uint8_t) (u >> 8); p[1] = (uint8_t) (u >> 16); p[0] = (uint8_t) (u >> 24); }
-                }
-                else if (bits == 16)
-                {
-                    const int q = juce::jlimit (-32768, 32767, (int) std::lround (v * 32767.0 + (rng.next() - rng.next())));
-                    if (wav) { p[0] = (uint8_t) q; p[1] = (uint8_t) (q >> 8); }
-                    else     { p[1] = (uint8_t) q; p[0] = (uint8_t) (q >> 8); }
-                }
-                else
-                {
-                    const int q = juce::jlimit (-8388608, 8388607, (int) std::lround (v * 8388607.0));
-                    if (wav) { p[0] = (uint8_t) q; p[1] = (uint8_t) (q >> 8); p[2] = (uint8_t) (q >> 16); }
-                    else     { p[2] = (uint8_t) q; p[1] = (uint8_t) (q >> 8); p[0] = (uint8_t) (q >> 16); }
-                }
-                p += bps;
-            }
-        }
-        if (! o.write (buf.get(), (size_t) (p - buf.get()))) { error = "disk full or write error"; return false; }
-    }
-    o.flush();
-    if (o.getStatus().failed()) { error = o.getStatus().getErrorMessage(); return false; }
-    return true;
+    return ! o.getStatus().failed();
 }
 
-// ------------------------------------------------------------- analyzer --
+bool PcmWriter::write (const float* x, size_t frames, float gain)
+{
+    if (out == nullptr) return false;
+    const bool wav = fmt == 0;
+    buf.resize (frames * (size_t) ch * (size_t) bps);
+    uint8_t* p = buf.data();
+    const size_t n = frames * (size_t) ch;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double v = (double) x[i] * gain;
+        if (bits == 32)
+        {
+            uint32_t u;
+            const float fv = (float) v;
+            std::memcpy (&u, &fv, 4);
+            if (wav) { p[0] = (uint8_t) u; p[1] = (uint8_t) (u >> 8); p[2] = (uint8_t) (u >> 16); p[3] = (uint8_t) (u >> 24); }
+            else     { p[3] = (uint8_t) u; p[2] = (uint8_t) (u >> 8); p[1] = (uint8_t) (u >> 16); p[0] = (uint8_t) (u >> 24); }
+        }
+        else if (bits == 16)
+        {
+            const int q = juce::jlimit (-32768, 32767, (int) std::lround (v * 32767.0 + (rng.next() - rng.next())));
+            if (wav) { p[0] = (uint8_t) q; p[1] = (uint8_t) (q >> 8); }
+            else     { p[1] = (uint8_t) q; p[0] = (uint8_t) (q >> 8); }
+        }
+        else
+        {
+            const int q = juce::jlimit (-8388608, 8388607, (int) std::lround (v * 8388607.0));
+            if (wav) { p[0] = (uint8_t) q; p[1] = (uint8_t) (q >> 8); p[2] = (uint8_t) (q >> 16); }
+            else     { p[2] = (uint8_t) q; p[1] = (uint8_t) (q >> 8); p[0] = (uint8_t) (q >> 16); }
+        }
+        p += bps;
+    }
+    return out->write (buf.data(), buf.size());
+}
+
+bool PcmWriter::close (juce::String& error)
+{
+    if (out == nullptr) return false;
+    out->flush();
+    const bool ok = ! out->getStatus().failed();
+    if (! ok) error = "disk full or write error: " + out->getStatus().getErrorMessage();
+    out.reset();
+    return ok;
+}
+
+bool writeAudioFile (const juce::File& f, int format, int bits, const std::vector<const float*>& chans,
+                     size_t frames, double sampleRate, float gain, juce::String& error)
+{
+    PcmWriter w;
+    const int ch = (int) chans.size();
+    if (! w.open (f, format, bits, ch, frames, sampleRate, error)) return false;
+    std::vector<float> il;
+    for (size_t f0 = 0; f0 < frames; f0 += 65536)
+    {
+        const size_t k = std::min<size_t> (65536, frames - f0);
+        il.resize (k * (size_t) ch);
+        for (size_t i = 0; i < k; ++i)
+            for (int c = 0; c < ch; ++c) il[i * (size_t) ch + (size_t) c] = chans[(size_t) c][f0 + i];
+        if (! w.write (il.data(), k, gain)) { error = "write error"; return false; }
+    }
+    return w.close (error);
+}
+
+// ====================================================== StreamConvolver
+
+void StreamConvolver::prepare (const std::vector<float>& ir)
+{
+    const int hLen = juce::jmax (1, (int) ir.size());
+    n = 1 << 15;
+    while (n < 2 * hLen) n <<= 1;
+    B = n - hLen + 1;
+    H = n / 2 + 1;
+    fft.prepare (n);
+    hr.assign ((size_t) H, 0.0); hi.assign ((size_t) H, 0.0);
+    xr.assign ((size_t) H, 0.0); xi.assign ((size_t) H, 0.0);
+    buf.assign ((size_t) n, 0.0);
+    acc.assign ((size_t) n, 0.0);
+    for (int i = 0; i < n; ++i) buf[(size_t) i] = i < (int) ir.size() ? ir[(size_t) i] : 0.0;
+    fft.forward (buf.data(), hr.data(), hi.data());
+}
+
+void StreamConvolver::process (const float* in, float* out)
+{
+    for (int i = 0; i < n; ++i) buf[(size_t) i] = i < B ? in[i] : 0.0;
+    fft.forward (buf.data(), xr.data(), xi.data());
+    for (int k = 0; k < H; ++k)
+    {
+        const double r = xr[(size_t) k] * hr[(size_t) k] - xi[(size_t) k] * hi[(size_t) k];
+        const double im = xr[(size_t) k] * hi[(size_t) k] + xi[(size_t) k] * hr[(size_t) k];
+        xr[(size_t) k] = r; xi[(size_t) k] = im;
+    }
+    fft.inverse (xr.data(), xi.data(), buf.data());
+    for (int i = 0; i < n; ++i) acc[(size_t) i] += buf[(size_t) i];
+    for (int i = 0; i < B; ++i) out[i] = (float) acc[(size_t) i];
+    std::copy (acc.begin() + B, acc.end(), acc.begin());
+    std::fill (acc.end() - B, acc.end(), 0.0);
+}
+
+// ============================================================= Analyzer
 
 void Analyzer::request (const OfflineSettings& s, double outputRate)
 {
@@ -182,7 +256,12 @@ void Analyzer::run()
     }
 }
 
-// ------------------------------------------------------------- exporter --
+// ============================================================= Exporter
+
+static int irLength (double rate, float size)
+{
+    return (int) std::lround (0.012 * rate) + juce::jmax (1, (int) std::lround (juce::jmax (0.05f, size) * rate));
+}
 
 void Exporter::estimate (const OfflineSettings& s, int64_t& frames, int& channels, double& rate)
 {
@@ -190,8 +269,8 @@ void Exporter::estimate (const OfflineSettings& s, int64_t& frames, int& channel
     if (s.data == nullptr) return;
     const auto view = makeView (*s.data, s.regionA, s.regionB);
     rate = view.sampleRate;
-    frames = (int64_t) std::llround (view.len * s.stream.stretch);
-    if (s.reverbPct > 0) frames += (int64_t) std::llround ((0.012 + juce::jmax (0.05f, s.sizeSec)) * rate);
+    frames = (int64_t) std::llround (view.len * s.stream.stretch) + windowSizeFor (rate) / 2;
+    if (s.reverbPct > 0) frames += irLength (rate, s.sizeSec) - 1;
     channels = (view.numChannels == 1 && ! s.stream.monoToStereo && s.reverbPct <= 0) ? 1 : 2;
 }
 
@@ -200,12 +279,11 @@ bool Exporter::start (const OfflineSettings& s, const juce::File& file, int form
     if (isThreadRunning() || s.data == nullptr) return false;
     job = s;
     job.stream.loop = false;
-    outFile = file;
+    { const juce::ScopedLock sl (msgLock); outFile = file; msg = {}; }
     fmt = format;
     bitDepth = bits;
     prog.store (0);
     st.store (Running);
-    { const juce::ScopedLock sl (msgLock); msg = {}; }
     startThread (juce::Thread::Priority::normal);
     return true;
 }
@@ -220,75 +298,131 @@ void Exporter::run()
 {
     const auto view = makeView (*job.data, job.regionA, job.regionB);
     const double rate = view.sampleRate;
-    int64_t frames; int channels; double r;
-    estimate (job, frames, channels, r);
-    if (frames * 2 > kMaxSamples) { finish (Failed, U8 ("output too long — select a shorter region or lower the stretch")); return; }
+    int64_t estFrames; int ch; double r;
+    estimate (job, estFrames, ch, r);
+    if (tooLong (estFrames, rate)) { finish (Failed, "longer than 12 hours - select a shorter region or lower the stretch"); return; }
 
-    StretchStream stream;
-    stream.prepare (rate);
-    stream.start (0.0, juce::Random::getSystemRandom().nextInt() | 1, job.stream.reverse, view.len);
-
-    const size_t dryLen = (size_t) std::llround (view.len * job.stream.stretch) + (size_t) stream.grainSize();
-    std::vector<float> L, R;
-    try { L.assign (dryLen, 0.0f); R.assign (dryLen, 0.0f); }
-    catch (...) { finish (Failed, "not enough memory"); return; }
-
-    size_t done = 0;
-    const int block = 8192;
-    while (done < dryLen)
+    // disk space: temporary float file + the final file
+    const auto dir = outFile.getParentDirectory();
+    const int64_t need = estFrames * ch * 4 + estFrames * ch * (bitDepth / 8) + (64 << 20);
+    const int64_t free = dir.getBytesFreeOnVolume();
+    if (free > 0 && free < need)
     {
-        if (threadShouldExit()) { finish (Cancelled, "export cancelled"); return; }
-        const int n = (int) std::min<size_t> (block, dryLen - done);
-        const int got = stream.render (view, job.stream, L.data() + done, R.data() + done, n, 1.0f);
-        done += (size_t) got;
-        prog.store (0.85f * (float) done / (float) dryLen);
-        if (got < n) break;
+        finish (Failed, "not enough disk space (needs " + juce::String ((double) need / 1073741824.0, 1) + " GB free)");
+        return;
     }
-    L.resize (done);
-    R.resize (done);
 
-    std::vector<float> outL, outR;
-    if (job.reverbPct > 0)
-    {
-        std::vector<float> irL, irR;
-        makeImpulse (rate, job.sizeSec, kIrSeed, irL, irR);
-        const double a = job.reverbPct / 100.0;
-        const float dry = (float) std::cos (a * kPi / 2), wet = (float) std::sin (a * kPi / 2);
-        const size_t len = done + irL.size() - 1;
-        try { outL.assign (len, 0.0f); outR.assign (len, 0.0f); }
-        catch (...) { finish (Failed, "not enough memory"); return; }
-        fftConvolve (L.data(), done, irL.data(), irL.size(), outL.data());
-        if (threadShouldExit()) { finish (Cancelled, "export cancelled"); return; }
-        prog.store (0.92f);
-        fftConvolve (R.data(), done, irR.data(), irR.size(), outR.data());
-        for (size_t i = 0; i < len; ++i)
-        {
-            outL[i] *= wet; outR[i] *= wet;
-            if (i < done) { outL[i] += dry * L[i]; outR[i] += dry * R[i]; }
-        }
-        L.swap (outL);
-        R.swap (outR);
-    }
-    if (threadShouldExit()) { finish (Cancelled, "export cancelled"); return; }
-    prog.store (0.96f);
+    const juce::File temp = dir.getChildFile ("." + outFile.getFileName() + ".slowsippin-tmp");
+    struct Cleanup { juce::File f; ~Cleanup() { f.deleteFile(); } } cleanup { temp };
 
+    // ---------------- pass 1: render → temporary float file, measure peak
     float peak = 0;
-    for (size_t i = 0; i < L.size(); ++i) peak = juce::jmax (peak, std::abs (L[i]), std::abs (R[i]));
+    uint64_t written = 0;
+    {
+        temp.deleteFile();
+        juce::FileOutputStream tmp (temp, 1 << 20);
+        if (! tmp.openedOk()) { finish (Failed, "cannot write to " + dir.getFullPathName()); return; }
+
+        StretchStream stream;
+        stream.prepare (rate);
+        stream.start (0.0, (uint32_t) juce::Random::getSystemRandom().nextInt() | 1u, job.stream.reverse, view.len);
+
+        const bool rev = job.reverbPct > 0;
+        StreamConvolver convL, convR;
+        if (rev)
+        {
+            std::vector<float> irL, irR;
+            makeImpulse (rate, job.sizeSec, kIrSeed, irL, irR);
+            convL.prepare (irL);
+            convR.prepare (irR);
+        }
+        const int block = rev ? convL.blockSize() : 65536;
+        const float wet = (float) (job.reverbPct / 100.0);   // reverb is added on top of the dry sound
+        std::vector<float> L ((size_t) block), R ((size_t) block), wL ((size_t) block), wR ((size_t) block);
+        std::vector<float> il ((size_t) block * (size_t) ch);
+        const int64_t irTail = rev ? irLength (rate, job.sizeSec) - 1 : 0;
+        bool engineDone = false;
+        int64_t tailLeft = irTail;
+
+        while (true)
+        {
+            if (threadShouldExit()) { finish (Cancelled, "export cancelled"); return; }
+            std::fill (L.begin(), L.end(), 0.0f);
+            std::fill (R.begin(), R.end(), 0.0f);
+            int valid = 0;
+            if (! engineDone)
+            {
+                valid = stream.render (view, job.stream, L.data(), R.data(), block, 1.0f);
+                if (valid < block) engineDone = true;
+            }
+            int emit = valid;
+            if (rev)
+            {
+                convL.process (L.data(), wL.data());
+                convR.process (R.data(), wR.data());
+                if (engineDone)
+                {
+                    const int extra = (int) std::min<int64_t> (tailLeft, block - valid);
+                    tailLeft -= extra;
+                    emit = valid + extra;
+                }
+                for (int i = 0; i < emit; ++i)
+                {
+                    L[(size_t) i] += wet * wL[(size_t) i];
+                    R[(size_t) i] += wet * wR[(size_t) i];
+                }
+            }
+            for (int i = 0; i < emit; ++i)
+            {
+                peak = juce::jmax (peak, std::abs (L[(size_t) i]), std::abs (R[(size_t) i]));
+                if (ch == 2) { il[(size_t) (2 * i)] = L[(size_t) i]; il[(size_t) (2 * i + 1)] = R[(size_t) i]; }
+                else il[(size_t) i] = L[(size_t) i];
+            }
+            if (emit > 0 && ! tmp.write (il.data(), (size_t) emit * (size_t) ch * sizeof (float)))
+            {
+                finish (Failed, "disk full or write error");
+                return;
+            }
+            written += (uint64_t) emit;
+            prog.store (0.9f * (float) juce::jmin (1.0, (double) written / (double) juce::jmax<int64_t> (1, estFrames)));
+            if (engineDone && (! rev || tailLeft <= 0)) break;
+        }
+        tmp.flush();
+        if (tmp.getStatus().failed()) { finish (Failed, "disk full or write error"); return; }
+    }
+
+    // ---------------- pass 2: normalize + gain → final format
     const float norm = job.normalize ? std::pow (10.0f, -0.5f / 20.0f) / juce::jmax (1e-9f, peak) : 1.0f;
     const float gain = norm * juce::Decibels::decibelsToGain (job.gainDb, -100.0f);
-
-    std::vector<const float*> chans { L.data() };
-    if (channels == 2) chans.push_back (R.data());
-    juce::String err;
-    if (! writeAudioFile (outFile, fmt, bitDepth, chans, L.size(), rate, gain, err)) { finish (Failed, err); return; }
+    {
+        juce::String err;
+        PcmWriter w;
+        if (! w.open (outFile, fmt, bitDepth, ch, written, rate, err)) { finish (Failed, err); return; }
+        juce::FileInputStream in (temp);
+        if (! in.openedOk()) { finish (Failed, "cannot read temporary file"); return; }
+        std::vector<float> chunk ((size_t) 65536 * (size_t) ch);
+        uint64_t done = 0;
+        while (done < written)
+        {
+            if (threadShouldExit()) { w.close (err); outFile.deleteFile(); finish (Cancelled, "export cancelled"); return; }
+            const size_t k = (size_t) std::min<uint64_t> (65536, written - done);
+            const size_t bytes = k * (size_t) ch * sizeof (float);
+            if ((size_t) in.read (chunk.data(), (int) bytes) != bytes) { w.close (err); finish (Failed, "read error"); return; }
+            if (! w.write (chunk.data(), k, gain)) { w.close (err); finish (Failed, "disk full or write error"); return; }
+            done += k;
+            prog.store (0.9f + 0.1f * (float) ((double) done / (double) written));
+        }
+        if (! w.close (err)) { finish (Failed, err); return; }
+    }
     prog.store (1.0f);
 
     const float outDb = juce::Decibels::gainToDecibels (peak * gain, -100.0f);
-    const auto sizeMB = juce::String ((double) outFile.getSize() / 1048576.0, 1) + " MB";
+    const auto size = (double) outFile.getSize();
+    const auto sizeTxt = size > 1073741824.0 ? juce::String (size / 1073741824.0, 2) + " GB" : juce::String (size / 1048576.0, 1) + " MB";
     if (outDb > 0.01f && bitDepth != 32)
         finish (Done, "saved " + outFile.getFileName() + U8 (" · clipped by ") + juce::String (outDb, 1) + " dB (lower GAIN)");
     else
-        finish (Done, "saved " + outFile.getFileName() + U8 (" · ") + sizeMB);
+        finish (Done, "saved " + outFile.getFileName() + U8 (" · ") + sizeTxt);
 }
 
 } // namespace ss

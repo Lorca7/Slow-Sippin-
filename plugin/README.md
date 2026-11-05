@@ -30,6 +30,8 @@ There's no Render step: the stretch is computed live, so every control can be ch
 - **PLAY / STOP** (or Space) plays the stretched sound. **MIDI notes play it too**: polyphonic with 8 voices, transposed relative to C3 when KEY TRACK is on, with velocity, sustain pedal, and pitch bend of ±2 semitones.
 - **The output panel** draws the stretched sound as you hear it. Click anywhere on it to set the start point, which jumps there if playing. The thin lines on the source waveform show where each voice is reading.
 - **RENDER & SAVE** renders the whole one-shot (region × stretch, plus reverb tail) in the background, with a progress bar and **CANCEL**. It saves WAV or AIFF at 16-bit (dithered), 24-bit or 32-bit float.
+  - Renders can be any length up to **12 hours**. They stream to disk, so an hour-long file needs very little memory, but it does need free disk space: about 2.5 GB for an hour of 24-bit stereo at 48 kHz, freed again once the file is saved.
+  - WAV files over 4 GB are written as RF64. AIFF can't exceed 4 GB, so use WAV for very long 32-bit renders.
 
 ### Controls
 
@@ -40,7 +42,7 @@ There's no Render step: the stretch is computed live, so every control can be ch
 | **Weave** | Grains overlapping at each moment (1–16). 1 is broken and pulsing; higher values are smoother and glassier. |
 | **Scatter** | 0 % keeps the real phase: a coherent stretch where attacks keep their shape. 100 % invents the phase for the full texture. |
 | **Drift** | Each grain reads from a wandering position, up to ± this many ms, so the texture breathes. |
-| **Reverb / Size** | Internal reverb amount and decay time (RT60). |
+| **Reverb / Size** | Internal reverb: how much reverb is added on top of the sound, and its decay time (RT60). The dry sound stays at full level. |
 | **Gain** | Output level. |
 | **Attack / Release** | Fade-in and fade-out of each note. STOP always fades quickly. |
 | **Normalize** | Brings the level up to a safe maximum: it measures the stretched sound's peak in the background, and a limiter catches chords. |
@@ -48,6 +50,8 @@ There's no Render step: the stretch is computed live, so every control can be ch
 | **Reverse** | Plays the stretched sound backwards. |
 | **Loop** | Off: a one-shot lasting region × stretch. On: the region loops seamlessly, for endless drones. |
 | **Key track** | MIDI notes transpose the sound. Off: every key plays at the Pitch setting. |
+
+Every control is independent: changing one never moves another. Sliders ignore the scroll wheel and trackpad, so scrolling can't change a value by accident. Normalize is the one deliberate interaction: it re-measures the level when the engine controls change, keeping the output at the same safe maximum.
 
 Everything is automatable from the DAW. The project remembers the sample (by file path), the region, the start point and the export settings.
 

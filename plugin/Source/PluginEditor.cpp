@@ -282,7 +282,7 @@ ControlRow::ControlRow (const ControlSpec& s, juce::RangedAudioParameter& p) : s
     slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
     slider.setRange (0.0, 1.0, 0.0);
     slider.setDoubleClickReturnValue (true, specToPos (spec, spec.def));
-    slider.setVelocityModeParameters (1.0, 1, 0.0, false);
+    slider.setScrollWheelEnabled (false);   // trackpad/wheel scrolling must never change a control
     slider.onDragStart = [this] { dragging = true; param.beginChangeGesture(); };
     slider.onDragEnd = [this] { dragging = false; param.endChangeGesture(); };
     slider.onValueChange = [this]
@@ -300,16 +300,22 @@ ControlRow::ControlRow (const ControlSpec& s, juce::RangedAudioParameter& p) : s
     box.setFont (Fonts::mono (14.0f));
     box.setSelectAllWhenFocused (true);
     box.setInputRestrictions (16, "0123456789.,-+eE");
+    // only what was actually typed is applied - focus changes never write a stale value back
+    box.onTextChange = [this] { edited = true; };
     auto commit = [this]
     {
-        const double v = parseNumber (box.getText());
-        if (std::isfinite (v)) { param.beginChangeGesture(); apply (v); param.endChangeGesture(); }
+        if (edited)
+        {
+            const double v = parseNumber (box.getText());
+            if (std::isfinite (v)) { param.beginChangeGesture(); apply (v); param.endChangeGesture(); }
+        }
+        edited = false;
         shown = std::numeric_limits<double>::quiet_NaN();
         refresh();
     };
     box.onReturnKey = [this, commit] { commit(); box.selectAll(); };
     box.onFocusLost = commit;
-    box.onEscapeKey = [this] { shown = std::numeric_limits<double>::quiet_NaN(); refresh(); box.giveAwayKeyboardFocus(); };
+    box.onEscapeKey = [this] { edited = false; shown = std::numeric_limits<double>::quiet_NaN(); refresh(); box.giveAwayKeyboardFocus(); };
     box.onNudge = [this] (int dir, bool big)
     {
         const double cur = current();
@@ -318,6 +324,7 @@ ControlRow::ControlRow (const ControlSpec& s, juce::RangedAudioParameter& p) : s
         param.beginChangeGesture();
         apply (cur + dir * step);
         param.endChangeGesture();
+        edited = false;
         shown = std::numeric_limits<double>::quiet_NaN();
         refresh();
         box.selectAll();
@@ -345,7 +352,7 @@ void ControlRow::refresh()
     shown = v;
     const juce::ScopedValueSetter<bool> svs (updating, true);
     if (! dragging) slider.setValue (specToPos (spec, v), juce::dontSendNotification);
-    if (! box.hasKeyboardFocus (true)) box.setText (juce::String (v, decimalsFor (v)), false);
+    if (! edited) box.setText (juce::String (v, decimalsFor (v)), false);
     repaint();
 }
 
@@ -420,6 +427,8 @@ SlowSippinEditor::SlowSippinEditor (SlowSippinProcessor& p)
     bitsBox.setSelectedId (proc.exportBits, juce::dontSendNotification);
     fmtBox.onChange = [this] { proc.exportFormat = fmtBox.getSelectedId() == 2 ? 1 : 0; };
     bitsBox.onChange = [this] { proc.exportBits = bitsBox.getSelectedId(); };
+    fmtBox.setScrollWheelEnabled (false);
+    bitsBox.setScrollWheelEnabled (false);
     addAndMakeVisible (fmtBox);
     addAndMakeVisible (bitsBox);
 
@@ -620,10 +629,12 @@ void SlowSippinEditor::paint (juce::Graphics& g)
     juce::String est = "-";
     if (frames > 0)
     {
-        est = fmtDur ((double) frames / rate) + U8 (" · ") + juce::String (ch) + U8 ("ch · ") + fmtMB ((double) frames * ch * bitsBox.getSelectedId() / 8.0);
-        if (frames * 2 > Exporter::kMaxSamples) est = "too long to render to a file - select a shorter region";
+        const double bytes = (double) frames * ch * bitsBox.getSelectedId() / 8.0;
+        est = fmtDur ((double) frames / rate) + U8 (" · ") + juce::String (ch) + U8 ("ch · ")
+            + (bytes > 1073741824.0 ? juce::String (bytes / 1073741824.0, 2) + " GB" : fmtMB (bytes));
+        if (Exporter::tooLong (frames, rate)) est = "longer than 12 hours - select a shorter region";
     }
-    g.setColour (frames * 2 > Exporter::kMaxSamples ? Colours::red : Colours::muted);
+    g.setColour (Exporter::tooLong (frames, rate) ? Colours::red : Colours::muted);
     g.drawText (est, exportBtn.getRight() - 600, exportBtn.getBottom() + 4, 600, 18, juce::Justification::centredRight);
 
     if (dragOver)
@@ -739,7 +750,7 @@ void SlowSippinEditor::startExport()
     if (s.data == nullptr) { openSample(); return; }
     int64_t frames; int ch; double rate;
     Exporter::estimate (s, frames, ch, rate);
-    if (frames * 2 > Exporter::kMaxSamples) { setStatus ("too long to render - select a shorter region or lower STRETCH", true, 6000); return; }
+    if (Exporter::tooLong (frames, rate)) { setStatus ("longer than 12 hours - select a shorter region or lower STRETCH", true, 6000); return; }
 
     const bool aiff = fmtBox.getSelectedId() == 2;
     const auto ext = aiff ? juce::String ("aif") : juce::String ("wav");
