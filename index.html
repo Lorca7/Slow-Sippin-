@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Slow Sippin' — extreme time-stretch</title>
+  <meta name="description" content="An extreme time-stretch instrument for textures, pads and drones.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app" id="app">
+
+    <header class="top">
+      <div class="brand">
+        <h1>SLOW SIPPIN'</h1>
+        <div class="sub">TIME-STRETCH<br><span>textures · pads · drones</span></div>
+      </div>
+      <button class="btn" id="loadBtn" type="button">+ SAMPLE</button>
+      <input type="file" id="fileInput" hidden
+             accept=".wav,.wave,.aif,.aiff,.aifc,.mp3,.flac,audio/wav,audio/x-wav,audio/aiff,audio/x-aiff,audio/mpeg,audio/flac">
+      <div class="fileinfo" id="fileInfo">no sample — drop a file anywhere, or click + SAMPLE</div>
+      <div class="status" id="status"><span class="dot"></span><span class="status-text" id="statusText">idle</span></div>
+    </header>
+
+    <main class="main">
+      <section class="left">
+        <div class="wave source" id="srcWave">
+          <canvas class="base"></canvas><canvas class="over"></canvas>
+          <span class="tag tl">SOURCE</span>
+          <span class="tag tr" id="regionTag"></span>
+          <div class="empty" id="srcEmpty">
+            <strong>DROP A SAMPLE</strong>
+            <span>WAV · AIFF · MP3 · FLAC</span>
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn" id="auditionBtn" type="button">AUDITION</button>
+          <span class="hint">drag = select · click = point · dbl-click = clear</span>
+        </div>
+
+        <div class="wave rendered" id="outWave">
+          <canvas class="base"></canvas><canvas class="over"></canvas>
+          <span class="tag tl">RENDERED</span>
+          <span class="tag tr" id="timeTag"></span>
+          <div class="progress" id="progress">
+            <div class="bar"><i id="progressBar"></i></div>
+            <span id="progressText">RENDERING</span>
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn primary" id="renderBtn" type="button">RENDER</button>
+          <button class="btn" id="playBtn" type="button">PLAY</button>
+          <button class="btn" id="stopBtn" type="button">STOP</button>
+          <span class="hint" id="outHint">click rendered wave to set start point</span>
+        </div>
+      </section>
+
+      <section class="right">
+        <div class="controls" id="controls"></div>
+        <div class="toggles">
+          <label class="toggle"><input type="checkbox" id="tNormalize"><span>NORMALIZE</span></label>
+          <label class="toggle"><input type="checkbox" id="tMonoStereo"><span>MONO → STEREO</span></label>
+          <label class="toggle"><input type="checkbox" id="tReverse"><span>REVERSE</span></label>
+        </div>
+        <p class="legend">
+          <span class="dot-e"></span> stretch · pitch · weave · scatter · drift · mono→stereo need a new render.
+          Reverb, size, gain, normalize and reverse are heard at once.
+        </p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <div class="stat"><span class="k">SOURCE</span><span class="v" id="statSource">—</span></div>
+      <div class="stat"><span class="k">→ OUTPUT</span><span class="v strong" id="statOutput">—</span></div>
+      <div class="stat"><span class="k">MEMORY</span><span class="v" id="statMemory">0.0 MB</span></div>
+      <div class="export">
+        <span class="k">EXPORT</span>
+        <select id="fmtSel" aria-label="File format">
+          <option value="wav">WAV</option>
+          <option value="aiff">AIFF</option>
+        </select>
+        <select id="bitsSel" aria-label="Bit depth">
+          <option value="16">16-BIT</option>
+          <option value="24" selected>24-BIT</option>
+          <option value="32">32-BIT FLOAT</option>
+        </select>
+        <button class="btn" id="downloadBtn" type="button">DOWNLOAD</button>
+        <span class="est" id="statExport">—</span>
+      </div>
+    </footer>
+  </div>
+
+  <div class="dropzone" id="dropzone"><div>DROP TO LOAD</div></div>
+
+  <script src="js/engine.js"></script>
+  <script src="js/codec.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
