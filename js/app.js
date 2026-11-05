@@ -809,7 +809,12 @@
 
   // ------------------------------------------------------------ loading --
 
-  function openPicker() {
+  async function openPicker() {
+    if (window.native) {                       // macOS app: native Open dialog
+      const smp = await window.native.openSample();
+      if (smp) loadFile(new File([smp.data], smp.name));
+      return;
+    }
     $('#fileInput').click();
   }
 
@@ -1125,17 +1130,26 @@
       const blob = fmt === 'aiff'
         ? Codec.encodeAIFF(chans, buf.sampleRate, bits, g)
         : Codec.encodeWAV(chans, buf.sampleRate, bits, g);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = exportName(fmt === 'aiff' ? 'aif' : 'wav');
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      const name = exportName(fmt === 'aiff' ? 'aif' : 'wav');
+      let savedAs = name;
+      if (window.native) {                     // macOS app: native Save dialog
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const saved = await window.native.saveFile(name, bytes);
+        if (!saved) { setStatus('', 'export cancelled', 2500); return; }
+        savedAs = saved.split('/').pop();
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }
       const outDb = 20 * Math.log10(Math.max(1e-9, peak * g));
       if (outDb > 0.01 && bits !== 32) setStatus('error', 'exported — clipped by ' + outDb.toFixed(1) + ' dB (lower GAIN)', 7000);
-      else setStatus('ready', 'exported ' + fmtMB(blob.size), 4000);
+      else setStatus('ready', 'saved ' + savedAs + ' · ' + fmtMB(blob.size), 5000);
     } catch (e) {
       setStatus('error', 'export failed: ' + e.message, 7000);
     } finally {
@@ -1192,6 +1206,18 @@
     uiTransport();
     setStatus('', 'idle');
     probeWorker().then((ok) => { if (S.workerOK == null) S.workerOK = ok; });
+
+    if (window.native) {
+      document.documentElement.classList.add('native');
+      window.native.onOpenSample((smp) => loadFile(new File([smp.data], smp.name)));
+      window.native.onMenu((cmd) => {
+        if (cmd === 'render') startRender();
+        else if (cmd === 'play') { if (S.play) stopPlay(); else play(); }
+        else if (cmd === 'audition') toggleAudition();
+        else if (cmd === 'export') doExport();
+        else if (cmd === 'clear-region') setRegion(null);
+      });
+    }
 
     // test/automation hook
     window.SlowSippin = { state: S, loadFile, startRender, setParam: (id, v) => setParam(CTL[id], v, 'api'), setRegion };

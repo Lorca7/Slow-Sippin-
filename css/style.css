@@ -1,3 +1,9 @@
+/* Bundled fonts (SIL Open Font License, see fonts/) — no network needed. */
+@font-face { font-family: 'Archivo'; font-style: normal; font-weight: 100 900; font-display: block; src: url(../fonts/archivo-latin.woff2) format('woff2'); }
+@font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 300; font-display: block; src: url(../fonts/plexmono-300.woff2) format('woff2'); }
+@font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 400; font-display: block; src: url(../fonts/plexmono-400.woff2) format('woff2'); }
+@font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 500; font-display: block; src: url(../fonts/plexmono-500.woff2) format('woff2'); }
+
 :root {
   --page: #121211;
   --bg: #d9d5cc;
@@ -439,3 +445,10 @@ body.dragging .dropzone { display: flex; }
   .v { font-size: 16px; }
   .export select { padding-right: 34px; }
 }
+
+/* ------------------------------------------------- macOS app window -- */
+
+.native body { padding: 0; background: var(--bg); }
+.native .app { max-width: none; min-height: 100vh; box-shadow: none; display: flex; flex-direction: column; }
+.native .main { flex: 1; }
+.native .btn, .native .toggle, .native .ctl-label, .native .tag, .native .k { cursor: default; }

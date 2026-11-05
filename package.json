@@ -1,0 +1,17 @@
+{
+  "name": "slow-sippin",
+  "productName": "Slow Sippin",
+  "version": "1.0.0",
+  "description": "An extreme time-stretch instrument for textures, pads and drones.",
+  "main": "electron/main.js",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "node scripts/build-mac.js"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "44.9.0"
+  }
+}

@@ -3,31 +3,60 @@
 An extreme time-stretch instrument for textures, pads and drones. It can make a
 short sample last for minutes without changing its pitch.
 
-Plain HTML/CSS/JS with no build step and no dependencies. Rendering runs in Web
-Workers (one per channel), so the page stays responsive.
+Slow Sippin is a standalone macOS app for macOS 12 Monterey or later, including Sonoma 14.6. It runs fully offline and is built with Electron. Rendering runs in background threads, one per channel. Open and Save use the normal Mac dialogs.
 
-## Running it
+## Install on macOS
 
-Serve the folder over HTTP (Web Workers don't load from `file://`):
+1. Unzip the build for your Mac:
+   - `Slow-Sippin-1.0.0-mac-apple-silicon.zip` for M1/M2/M3/M4 Macs
+   - `Slow-Sippin-1.0.0-mac-intel.zip` for Intel Macs
+
+   To check which you have, go to  → About This Mac and look at "Chip".
+2. Drag **Slow Sippin.app** into **Applications**.
+3. **First launch only.** The app isn't signed with an Apple developer certificate, so macOS blocks it at first (often saying it "is damaged"). Open **Terminal** and paste:
+
+   ```sh
+   xattr -cr "/Applications/Slow Sippin.app" && codesign --force --deep --sign - "/Applications/Slow Sippin.app"
+   ```
+
+   This removes the download quarantine and signs the app locally on your Mac. Then open it normally.
+
+You can also open a sample by dropping it on the Dock icon, or from Finder with Open With → Slow Sippin.
+
+### Keyboard shortcuts
+
+| | |
+|---|---|
+| ⌘O | Load sample… |
+| ⌘E | Export… |
+| ⌘R | Render / cancel |
+| ⌘P or Space | Play / stop |
+| ⌘L | Audition |
+| ⌘D | Clear selection |
+
+### Building the app yourself
+
+Requires Node.js 20 or later.
 
 ```sh
-python3 -m http.server 8000
-# open http://localhost:8000
+npm install
+npm start                       # run without packaging
+npm run dist:mac                # → dist/*.zip for Apple Silicon and Intel
+npm run dist:mac -- arm64       # one architecture only
 ```
 
-If you open `index.html` directly from disk it still works. It then renders on
-the main thread in small slices, which is slower.
+On a Mac the build is ad-hoc signed automatically. An app you build yourself isn't quarantined, so it opens without the Terminal step.
 
-Any static host works, for example GitHub Pages.
+The same files also run in a browser (`python3 -m http.server`, then open `http://localhost:8000`). In that case, Download saves through the browser.
 
 ## Workflow
 
-1. **Load a sample.** Drag and drop it anywhere, or click **+ SAMPLE**. WAV, AIFF / AIF and FLAC load at their native sample rate. MP3 also loads at its native rate in most browsers.
+1. **Load a sample.** Drag and drop it anywhere, click **+ SAMPLE**, or press ⌘O. WAV, AIFF / AIF and FLAC load at their native sample rate. MP3 also loads at its native rate in most browsers.
 2. **Choose a region (optional).** Drag on the source waveform to select part of the sound. Click once to set a start point. Double-click to clear.
 3. **Listen first.** **AUDITION** plays the whole sample, or only the region.
 4. **Set the controls, then press RENDER.** A progress bar and time estimate appear. Press **CANCEL** to stop.
 5. **Play and check.** Click anywhere on the rendered waveform to start playback from that point. **Space** toggles play and stop.
-6. **Export.** Choose WAV or AIFF and 16-bit (dithered), 24-bit or 32-bit float, then press **DOWNLOAD**. The export includes the reverb tail.
+6. **Export.** Choose WAV or AIFF and 16-bit (dithered), 24-bit or 32-bit float, then press **DOWNLOAD** (or ⌘E). A Save dialog opens, defaulting to your Music folder. The export includes the reverb tail.
 
 ## Controls
 
@@ -68,6 +97,11 @@ Output is limited to about 64 M samples (≈ 11½ minutes of stereo at 48 kHz) t
 ## Files
 
 ```
+electron/main.js     macOS app: window, menu, app:// file serving, Open/Save dialogs, Finder "Open With"
+electron/preload.js  the narrow bridge between the page and macOS
+scripts/build-mac.js packages, signs and zips the .app (arm64 + x64)
+build/icon.icns      app icon
+fonts/               Archivo + IBM Plex Mono (SIL Open Font License), bundled for offline use
 index.html       layout
 css/style.css    styling (responsive down to phone width)
 js/engine.js     FFT, StretchJob, reverb impulse generator
