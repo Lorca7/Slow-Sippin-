@@ -1,0 +1,95 @@
+name: Build macOS plugin
+
+on:
+  push:
+    paths:
+      - "plugin/**"
+      - ".github/workflows/build-mac.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-mac-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    env:
+      VERSION: "1.0.0"
+      OUT: build/SlowSippin_artefacts/Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (universal: Apple Silicon + Intel, macOS 12+)
+        run: |
+          cmake -S plugin -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+
+      - name: Build AU, VST3 and Standalone
+        run: cmake --build build --config Release --target SlowSippin_AU SlowSippin_VST3 SlowSippin_Standalone EngineTests -j 3
+
+      - name: Engine tests
+        run: ./build/EngineTests
+
+      - name: Ad-hoc sign
+        run: |
+          for b in "$OUT/AU/Slow Sippin.component" "$OUT/VST3/Slow Sippin.vst3" "$OUT/Standalone/Slow Sippin.app"; do
+            codesign --force --deep --sign - "$b"
+            codesign --verify --deep --strict --verbose=2 "$b"
+            lipo -archs "$(find "$b/Contents/MacOS" -type f | head -1)"
+          done
+
+      - name: Validate Audio Unit (auval)
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "$OUT/AU/Slow Sippin.component" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 2
+          auval -a | grep -i "Slsp" || true
+          auval -strict -v aumu Sls1 Slsp
+
+      - name: Build installer (.pkg) and zip
+        run: |
+          set -e
+          mkdir -p pkg/au pkg/vst3 pkg/app dist
+          cp -R "$OUT/AU/Slow Sippin.component" pkg/au/
+          cp -R "$OUT/VST3/Slow Sippin.vst3" pkg/vst3/
+          cp -R "$OUT/Standalone/Slow Sippin.app" pkg/app/
+          build_pkg () {   # root, install location, identifier, output
+            pkgbuild --analyze --root "$1" "$4.plist"
+            plutil -replace 0.BundleIsRelocatable -bool NO "$4.plist"
+            pkgbuild --root "$1" --component-plist "$4.plist" --install-location "$2" \
+                     --identifier "$3" --version "$VERSION" "$4"
+          }
+          build_pkg pkg/au   /Library/Audio/Plug-Ins/Components eu.slowsippin.au   au.pkg
+          build_pkg pkg/vst3 /Library/Audio/Plug-Ins/VST3       eu.slowsippin.vst3 vst3.pkg
+          build_pkg pkg/app  /Applications                      eu.slowsippin.app  app.pkg
+          productbuild --package au.pkg --package vst3.pkg --package app.pkg "dist/Slow-Sippin-$VERSION-macOS.pkg"
+          (cd "$OUT" && ditto -c -k --keepParent "AU/Slow Sippin.component" "$GITHUB_WORKSPACE/dist/au.zip" \
+                     && ditto -c -k --keepParent "VST3/Slow Sippin.vst3" "$GITHUB_WORKSPACE/dist/vst3.zip" \
+                     && ditto -c -k --keepParent "Standalone/Slow Sippin.app" "$GITHUB_WORKSPACE/dist/app.zip")
+          mkdir -p z && (cd z && unzip -q ../dist/au.zip && unzip -q ../dist/vst3.zip && unzip -q ../dist/app.zip \
+                     && ditto -c -k . "../dist/Slow-Sippin-$VERSION-macOS-manual.zip")
+          rm dist/au.zip dist/vst3.zip dist/app.zip
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Slow-Sippin-macOS
+          path: dist/*
+
+      - name: Publish download (GitHub release "plugin-latest")
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete plugin-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create plugin-latest dist/* \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "Slow Sippin $VERSION for macOS (latest build)" \
+            --notes "Built from ${GITHUB_SHA::7} on branch ${GITHUB_REF_NAME}. Install with the .pkg (right-click → Open the first time). Contains the Audio Unit, VST3 and the standalone app; universal (Apple Silicon + Intel), macOS 12 or later."

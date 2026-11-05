@@ -3,7 +3,14 @@
 An extreme time-stretch instrument for textures, pads and drones. It can make a
 short sample last for minutes without changing its pitch.
 
-Slow Sippin is a standalone macOS app for macOS 12 Monterey or later, including Sonoma 14.6. It runs fully offline and is built with Electron. Rendering runs in background threads, one per channel. Open and Save use the normal Mac dialogs.
+> **Looking for the plugin?** Slow Sippin is now a native **Audio Unit, VST3 and
+> standalone Mac app**, and that version is the one to use. It plays live with
+> no render step, works with MIDI, and installs with a .pkg.
+> See **[plugin/README.md](plugin/README.md)**.
+>
+> The rest of this page describes the earlier Electron/web version.
+
+The earlier version is a standalone macOS app for macOS 12 Monterey or later, including Sonoma 14.6. It runs fully offline and is built with Electron. Rendering runs in background threads, one per channel. Open and Save use the normal Mac dialogs.
 
 ## Install on macOS
 
