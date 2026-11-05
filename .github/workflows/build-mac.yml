@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure (universal: Apple Silicon + Intel, macOS 12+)
+      - name: "Configure (universal: Apple Silicon + Intel, macOS 12+)"
         run: |
           cmake -S plugin -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -84,7 +84,7 @@ jobs:
           name: Slow-Sippin-macOS
           path: dist/*
 
-      - name: Publish download (GitHub release "plugin-latest")
+      - name: Publish download as the plugin-latest release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
