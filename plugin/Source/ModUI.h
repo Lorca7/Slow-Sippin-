@@ -27,6 +27,16 @@ inline int lfoFromDescription (const juce::var& d)
     return s.startsWith ("lfo:") ? s.fromFirstOccurrenceOf ("lfo:", false, false).getIntValue() : -1;
 }
 
+/** "632 Hz", "1.2 kHz", "55 %", "-3.0 st" … for a target's value. */
+inline juce::String formatTarget (int target, float v)
+{
+    const auto* sp = findSpec (targetParamId (target));
+    if (sp == nullptr) return juce::String (v, 2);
+    const juce::String unit = juce::String::fromUTF8 (sp->unit);
+    if (unit == "Hz" && v >= 1000.0f) return juce::String (v / 1000.0f, 2) + " kHz";
+    return fmtDec (v, sp->decimals) + " " + unit;
+}
+
 /** Small chip image used while dragging an LFO. */
 inline juce::Image lfoDragImage (int lfo)
 {
@@ -161,7 +171,7 @@ public:
     {
         px = proc.apvts.getParameter ("fxX");
         py = proc.apvts.getParameter ("fxY");
-        setTooltip ("Drag to blend the four effects. Turn up FX MIX to hear them. Drop an LFO here to move the pad.");
+        setTooltip ("Drag to play the two parameters chosen for X and Y below. Turn up FX MIX to hear the effects. Drop an LFO here to move the pad.");
     }
 
     void paint (juce::Graphics& g) override
@@ -175,13 +185,27 @@ public:
             g.fillRect (r.getX() + r.getWidth() * i / 4.0f, r.getY(), 1.0f, r.getHeight());
             g.fillRect (r.getX(), r.getY() + r.getHeight() * i / 4.0f, r.getWidth(), 1.0f);
         }
-        g.setFont (Fonts::sans (11.0f, Fonts::Bold, 0.18f));
+        // axis labels: what each axis drives, and its value now
+        const auto setup = proc.currentFxSetup();
+        auto axisText = [&] (int axis)
+        {
+            const int t = axis == 0 ? setup.padX : setup.padY;
+            if (t < 0) return juce::String ("off");
+            juce::String txt = padChoiceNames()[targetToPadChoice (t)];
+            const int k = fxTypeOfTarget (t);
+            if (t == tFxBal && setup.series) return txt + "  (parallel only)";
+            if (k >= 0 && k != setup.typeA && k != setup.typeB) return txt + "  (not in a slot)";
+            return txt + "  " + formatTarget (t, proc.effectiveValue (t));
+        };
         g.setColour (Colours::ink2);
-        auto in = r.reduced (10, 8);
-        g.drawText ("CHORUS", in, juce::Justification::topLeft);
-        g.drawText ("DUB ECHO", in, juce::Justification::topRight);
-        g.drawText ("FILTER", in, juce::Justification::bottomLeft);
-        g.drawText ("SPECTRAL", in, juce::Justification::bottomRight);
+        g.setFont (Fonts::sans (10.5f, Fonts::Bold, 0.12f));
+        g.drawText (juce::String::fromUTF8 ("X → ") + axisText (0), r.reduced (10, 6), juce::Justification::bottomRight);
+        {
+            juce::Graphics::ScopedSaveState saved (g);
+            g.addTransform (juce::AffineTransform::rotation (-juce::MathConstants<float>::halfPi, r.getX() + 16.0f, r.getBottom() - 10.0f));
+            g.drawText (juce::String::fromUTF8 ("Y → ") + axisText (1), juce::Rectangle<float> (r.getX() + 16.0f, r.getBottom() - 10.0f - 7.0f, r.getHeight() - 20.0f, 14.0f),
+                        juce::Justification::centredLeft);
+        }
 
         const float mix = proc.apvts.getRawParameterValue ("fxMix")->load();
         if (mix <= 0.0f)

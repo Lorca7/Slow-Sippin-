@@ -1,15 +1,14 @@
 /*
- * Effects — four parallel effects blended by the XY pad.
+ * Effects — two effect slots, A and B, each one of CHORUS / DUB ECHO /
+ * FILTER / SPECTRAL.
  *
- *        CHORUS ─────────── DUB ECHO          y = 1
- *          │                    │
- *        FILTER ─────────── SPECTRAL          y = 0
- *        x = 0                x = 1
+ *   SERIES:    dry → A → B → wet
+ *   PARALLEL:  dry → A ┐
+ *              dry → B ┴ balance (equal-power) → wet
  *
- * The pad position gives each corner a weight (bilinear, equal-power), the
- * weighted effect outputs are summed, and FX MIX crossfades dry ↔ that blend.
- * All four always run (so echo tails and filters keep their state when you
- * move the pad); the chain sleeps while FX MIX is at zero.
+ * FX MIX crossfades dry ↔ wet. Only the two chosen effects run; an effect
+ * that comes back into a slot starts clean. The chain sleeps while FX MIX
+ * is at zero. (Which parameters the XY pad drives is decided by the caller.)
  */
 #pragma once
 
@@ -22,7 +21,9 @@ namespace ss
 struct FxParams
 {
     float mix = 0;                       // 0..1
-    float x = 0.5f, y = 0.5f;            // 0..1
+    int typeA = 2, typeB = 1;            // FxType (Params.h): 0 chorus, 1 echo, 2 filter, 3 spectral; -1 = empty
+    bool series = true;
+    float balance = 0.5f;                // parallel: 0 = all A, 1 = all B
     float chRate = 0.35f, chDepth = 0.5f;
     float echoTimeMs = 375, echoFb = 0.55f, echoTone = 0.45f;
     float cutHz = 1200, res = 0.3f, type = 0;     // type: 0 LP → 0.5 BP → 1 HP
@@ -103,6 +104,7 @@ public:
 
 private:
     void run (float* L, float* R, int n, const FxParams& p) noexcept;
+    void runOne (int type, const float* inL, const float* inR, float* outL, float* outR, int n, const FxParams& p) noexcept;
 
     double sr = 48000;
     int maxBlock = 512;
@@ -111,8 +113,9 @@ private:
     DubEcho echo;
     Spectral spectral;
     std::vector<float> t[10];
-    float sMix = 0, sX = 0.5f, sY = 0.5f;
+    float sMix = 0, sBal = 0.5f;
     bool sleeping = true;
+    bool active[4] {};
 };
 
 } // namespace ss

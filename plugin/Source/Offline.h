@@ -59,6 +59,51 @@ private:
     std::vector<double> hr, hi, xr, xi, buf, acc;
 };
 
+/** Effect slots, routing, and which parameter each XY-pad axis drives (Target, -1 = off). */
+struct FxSetup
+{
+    int typeA = FxFilter, typeB = FxEcho;
+    bool series = true;
+    int padX = tFltCut, padY = tEchoFb;
+};
+
+/**
+ * Effect parameters at one moment: base values; a parameter mapped to a pad
+ * axis takes the pad position across its whole range instead; then LFOs routed
+ * to that parameter are added. routes == nullptr: use the live route table.
+ */
+inline FxParams makeFxParams (const FxSetup& s, const ModSystem& mod, const float* base, const float* lfo, const RouteList* routes)
+{
+    auto ap = [&] (int t, float b) { return routes != nullptr ? mod.apply (t, b, lfo, *routes) : mod.apply (t, b, lfo); };
+    const float px = juce::jlimit (0.0f, 1.0f, ap (tFxX, base[tFxX]) / 100.0f);
+    const float py = juce::jlimit (0.0f, 1.0f, ap (tFxY, base[tFxY]) / 100.0f);
+    auto v = [&] (int t)
+    {
+        float b = base[t];
+        if (s.padX == t) b = mod.fromNorm (t, px);
+        if (s.padY == t) b = mod.fromNorm (t, py);
+        return ap (t, b);
+    };
+    FxParams p;
+    p.typeA = s.typeA;
+    p.typeB = s.typeB;
+    p.series = s.series;
+    p.mix = v (tFxMix) / 100.0f;
+    p.balance = v (tFxBal) / 100.0f;
+    p.chRate = v (tChRate);
+    p.chDepth = v (tChDepth) / 100.0f;
+    p.echoTimeMs = v (tEchoTime);
+    p.echoFb = v (tEchoFb) / 100.0f;
+    p.echoTone = v (tEchoTone) / 100.0f;
+    p.cutHz = v (tFltCut);
+    p.res = v (tFltRes) / 100.0f;
+    p.type = v (tFltType) / 100.0f;
+    p.blur = v (tSpBlur) / 100.0f;
+    p.shiftSt = v (tSpShift);
+    p.thin = v (tSpThin) / 100.0f;
+    return p;
+}
+
 struct OfflineSettings
 {
     SampleData::Ptr data;
@@ -74,6 +119,7 @@ struct OfflineSettings
     RouteList routes {};
     const ModSystem* mod = nullptr;            // ranges only
     float preGain = 1;                         // live NORMALIZE level, so the effects see the same level
+    FxSetup fx;
 };
 
 class Analyzer : private juce::Thread

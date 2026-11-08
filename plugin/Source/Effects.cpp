@@ -339,41 +339,64 @@ void FxChain::process (float* L, float* R, int n, const FxParams& p) noexcept
     {
         if (p.mix <= 0.0f) return;
         reset();
+        for (auto& a : active) a = false;
         sleeping = false;
         sMix = 0;
-        sX = p.x;
-        sY = p.y;
+        sBal = p.balance;
     }
     for (int off = 0; off < n; off += maxBlock)
         run (L + off, R + off, std::min (maxBlock, n - off), p);
     if (p.mix <= 0.0f && sMix < 1.0e-4f) sleeping = true;
 }
 
+void FxChain::runOne (int type, const float* inL, const float* inR, float* outL, float* outR, int n, const FxParams& p) noexcept
+{
+    if (type < 0 || type > 3) { std::copy (inL, inL + n, outL); std::copy (inR, inR + n, outR); return; }
+    if (! active[type])
+    {
+        // an effect coming (back) into a slot starts clean
+        switch (type) { case 0: chorus.reset(); break; case 1: echo.reset(); break; case 2: filter.reset(); break; default: spectral.reset(); }
+        active[type] = true;
+    }
+    switch (type)
+    {
+        case 0:  chorus.process (inL, inR, outL, outR, n, p.chRate, p.chDepth); break;
+        case 1:  echo.process (inL, inR, outL, outR, n, p.echoTimeMs, p.echoFb, p.echoTone); break;
+        case 2:  filter.process (inL, inR, outL, outR, n, p.cutHz, p.res, p.type); break;
+        default: spectral.process (inL, inR, outL, outR, n, p.blur, p.shiftSt, p.thin); break;
+    }
+}
+
 void FxChain::run (float* L, float* R, int n, const FxParams& p) noexcept
 {
     float* dL = t[0].data(); float* dR = t[1].data();
-    float* cL = t[2].data(); float* cR = t[3].data();
-    float* eL = t[4].data(); float* eR = t[5].data();
-    float* fL = t[6].data(); float* fR = t[7].data();
-    float* sL = t[8].data(); float* sR = t[9].data();
+    float* aL = t[2].data(); float* aR = t[3].data();
+    float* bL = t[4].data(); float* bR = t[5].data();
     std::copy (L, L + n, dL);
     std::copy (R, R + n, dR);
-    chorus.process (dL, dR, cL, cR, n, p.chRate, p.chDepth);
-    echo.process (dL, dR, eL, eR, n, p.echoTimeMs, p.echoFb, p.echoTone);
-    filter.process (dL, dR, fL, fR, n, p.cutHz, p.res, p.type);
-    spectral.process (dL, dR, sL, sR, n, p.blur, p.shiftSt, p.thin);
+
+    const int A = p.typeA, B = (p.typeB == p.typeA) ? -1 : p.typeB;     // the same effect can't be in both slots
+    for (int k = 0; k < 4; ++k) if (k != A && k != B) active[k] = false;
+
+    runOne (A, dL, dR, aL, aR, n, p);
+    const bool par = ! p.series && A >= 0 && B >= 0;
+    if (par) runOne (B, dL, dR, bL, bR, n, p);
+    else     runOne (B, aL, aR, bL, bR, n, p);     // series: A feeds B (an empty slot passes through)
 
     const float k = 1.0f - std::exp ((float) (-1.0 / (0.03 * sr)));
-    const float tm = lim (0.0f, 1.0f, p.mix), tx = lim (0.0f, 1.0f, p.x), ty = lim (0.0f, 1.0f, p.y);
+    const float tm = lim (0.0f, 1.0f, p.mix), tb = lim (0.0f, 1.0f, p.balance);
     for (int i = 0; i < n; ++i)
     {
         sMix += (tm - sMix) * k;
-        sX += (tx - sX) * k;
-        sY += (ty - sY) * k;
-        const float wTL = std::sqrt ((1 - sX) * sY), wTR = std::sqrt (sX * sY);
-        const float wBL = std::sqrt ((1 - sX) * (1 - sY)), wBR = std::sqrt (sX * (1 - sY));
-        const float wetL = wTL * cL[i] + wTR * eL[i] + wBL * fL[i] + wBR * sL[i];
-        const float wetR = wTL * cR[i] + wTR * eR[i] + wBL * fR[i] + wBR * sR[i];
+        sBal += (tb - sBal) * k;
+        float wetL, wetR;
+        if (par)
+        {
+            const float ga = std::sqrt (1.0f - sBal), gb = std::sqrt (sBal);
+            wetL = ga * aL[i] + gb * bL[i];
+            wetR = ga * aR[i] + gb * bR[i];
+        }
+        else { wetL = bL[i]; wetR = bR[i]; }
         const float dg = std::cos (sMix * 1.5707963f), wg = std::sin (sMix * 1.5707963f);
         L[i] = dg * dL[i] + wg * wetL;
         R[i] = dg * dR[i] + wg * wetR;

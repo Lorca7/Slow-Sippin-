@@ -5,6 +5,12 @@
 namespace ss
 {
 
+/** v with exactly `decimals` places. (juce::String (v, 0) does NOT round: 0 means "default formatting".) */
+inline juce::String fmtDec (double v, int decimals)
+{
+    return decimals <= 0 ? juce::String (juce::roundToInt (v)) : juce::String (v, decimals);
+}
+
 /** Everything a control row needs: parameter range + how the slider maps to it. */
 struct ControlSpec
 {
@@ -44,8 +50,9 @@ inline const std::vector<ControlSpec>& controlSpecs()
         { "gain",    "GAIN",    "dB", -60.0f, 24.0f,  -24.0f, 24.0f,    0.0f, 1, C::Linear, false, false, C::Output },
         { "attack",  "ATTACK",  "ms", 0.0f, 20000.0f,  0.0f, 10000.0f, 40.0f, 0, C::Sqrt,   false, false, C::Output },
         { "release", "RELEASE", "ms", 0.0f, 30000.0f,  0.0f, 20000.0f, 1500.0f, 0, C::Sqrt, false, false, C::Output },
-        // ---- effects (XY pad blends chorus / echo / filter / spectral)
+        // ---- effects: two slots (A, B), the XY pad drives the parameters chosen for its axes
         { "fxMix",    "FX MIX",    "%",  0.0f, 100.0f,   0.0f, 100.0f,    0.0f, 0, C::Linear, false, false, C::Fx },
+        { "fxBal",    "A / B BALANCE", "%", 0.0f, 100.0f, 0.0f, 100.0f,  50.0f, 0, C::Linear, false, false, C::Fx },
         { "fxX",      "X",         "%",  0.0f, 100.0f,   0.0f, 100.0f,   50.0f, 0, C::Linear, false, false, C::Hidden },
         { "fxY",      "Y",         "%",  0.0f, 100.0f,   0.0f, 100.0f,   50.0f, 0, C::Linear, false, false, C::Hidden },
         { "chRate",   "RATE",      "Hz", 0.02f, 8.0f,    0.02f, 8.0f,    0.35f, 2, C::Log,    false, false, C::Fx },
@@ -113,7 +120,7 @@ enum Target
 {
     tStretch, tPitch, tWeave, tScatter, tDrift, tWindow,
     tReverb, tGain, tAttack, tRelease,
-    tFxMix, tFxX, tFxY, tChRate, tChDepth, tEchoTime, tEchoFb, tEchoTone,
+    tFxMix, tFxX, tFxY, tFxBal, tChRate, tChDepth, tEchoTime, tEchoFb, tEchoTone,
     tFltCut, tFltRes, tFltType, tSpBlur, tSpShift, tSpThin,
     kNumTargets
 };
@@ -123,7 +130,7 @@ inline const char* targetParamId (int t)
     static const char* ids[kNumTargets] = {
         "stretch", "pitch", "weave", "scatter", "drift", "window",
         "reverb", "gain", "attack", "release",
-        "fxMix", "fxX", "fxY", "chRate", "chDepth", "echoTime", "echoFb", "echoTone",
+        "fxMix", "fxX", "fxY", "fxBal", "chRate", "chDepth", "echoTime", "echoFb", "echoTone",
         "fltCut", "fltRes", "fltType", "spBlur", "spShift", "spThin" };
     return ids[t];
 }
@@ -132,6 +139,52 @@ inline int targetForParam (const juce::String& id)
 {
     for (int t = 0; t < kNumTargets; ++t) if (id == targetParamId (t)) return t;
     return -1;
+}
+
+// ------------------------------------------------- effect slots + XY pad
+
+enum FxType { FxChorus, FxEcho, FxFilter, FxSpectral, kNumFxTypes };
+
+inline juce::StringArray fxTypeNames() { return { "CHORUS", "DUB ECHO", "FILTER", "SPECTRAL" }; }
+
+/** The parameters of each effect, in display order. */
+inline std::vector<int> fxTypeTargets (int type)
+{
+    switch (type)
+    {
+        case FxChorus:   return { tChRate, tChDepth };
+        case FxEcho:     return { tEchoTime, tEchoFb, tEchoTone };
+        case FxFilter:   return { tFltCut, tFltRes, tFltType };
+        case FxSpectral: return { tSpBlur, tSpShift, tSpThin };
+        default:         return {};
+    }
+}
+
+inline int fxTypeOfTarget (int t)
+{
+    for (int k = 0; k < kNumFxTypes; ++k)
+        for (int x : fxTypeTargets (k)) if (x == t) return k;
+    return -1;
+}
+
+/** What an XY-pad axis can drive: choice index → Target (-1 = off). */
+inline int padChoiceToTarget (int choice)
+{
+    static const int map[] = { -1, tFxBal, tChRate, tChDepth, tEchoTime, tEchoFb, tEchoTone,
+                               tFltCut, tFltRes, tFltType, tSpBlur, tSpShift, tSpThin };
+    return choice >= 0 && choice < (int) (sizeof (map) / sizeof (map[0])) ? map[choice] : -1;
+}
+
+inline int targetToPadChoice (int target)
+{
+    for (int c = 0; c < 13; ++c) if (padChoiceToTarget (c) == target) return c;
+    return 0;
+}
+
+inline juce::StringArray padChoiceNames()
+{
+    return { "OFF", "A / B BALANCE", "CHORUS RATE", "CHORUS DEPTH", "ECHO TIME", "ECHO FEEDBACK", "ECHO TONE",
+             "FILTER CUTOFF", "FILTER RESONANCE", "FILTER TYPE", "SPECTRAL BLUR", "SPECTRAL SHIFT", "SPECTRAL THIN" };
 }
 
 // ------------------------------------------------------- slider mapping
@@ -191,8 +244,9 @@ inline juce::String hostName (const ControlSpec& c)
     if (id.startsWith ("echo")) return "ECHO " + juce::String (c.label);
     if (id.startsWith ("flt")) return "FILTER " + juce::String::fromUTF8 (c.label);
     if (id.startsWith ("sp")) return "SPECTRAL " + juce::String (c.label);
-    if (id == "fxX") return "FX X";
-    if (id == "fxY") return "FX Y";
+    if (id == "fxX") return "PAD X";
+    if (id == "fxY") return "PAD Y";
+    if (id == "fxBal") return "FX A / B BALANCE";
     return juce::String::fromUTF8 (c.label);
 }
 
@@ -203,7 +257,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     {
         auto attrs = juce::AudioParameterFloatAttributes()
                          .withLabel (c.unit)
-                         .withStringFromValueFunction ([dec = c.decimals] (float v, int) { return juce::String (v, dec); });
+                         .withStringFromValueFunction ([dec = c.decimals] (float v, int) { return fmtDec (v, dec); });
         const auto name = hostName (c);
         if (c.integer)
             layout.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { c.id, 1 }, name, (int) c.pMin, (int) c.pMax, (int) c.def));
@@ -212,6 +266,11 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     }
     for (const auto& t : toggleSpecs())
         layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { t.id, 1 }, juce::String::fromUTF8 (t.label), t.def));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "fxA", 1 }, "FX SLOT A", fxTypeNames(), FxFilter));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "fxB", 1 }, "FX SLOT B", fxTypeNames(), FxEcho));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "fxRoute", 1 }, "FX ROUTING", juce::StringArray { "SERIES", "PARALLEL" }, 0));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "padX", 1 }, "PAD X CONTROLS", padChoiceNames(), targetToPadChoice (tFltCut)));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "padY", 1 }, "PAD Y CONTROLS", padChoiceNames(), targetToPadChoice (tEchoFb)));
     for (int i = 0; i < kNumLfos; ++i)
         layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { lfoShapeId (i), 1 },
                                                                    "LFO " + juce::String (i + 1) + " SHAPE", lfoShapeNames(), kDefaultShapes[i]));

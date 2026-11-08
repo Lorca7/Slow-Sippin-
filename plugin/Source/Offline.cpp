@@ -381,21 +381,8 @@ void Exporter::run()
                     const auto v = regionView (*job.data, job.regionA, job.regionB, modv (tWindow, lfo));
                     if (stream.render (v, st, L.data() + o, R.data() + o, n, job.preGain) < n) engineDone = true;
                 }
-                FxParams fp;
-                fp.mix = modv (tFxMix, lfo) / 100.0f;
-                fp.x = modv (tFxX, lfo) / 100.0f;
-                fp.y = modv (tFxY, lfo) / 100.0f;
-                fp.chRate = modv (tChRate, lfo);
-                fp.chDepth = modv (tChDepth, lfo) / 100.0f;
-                fp.echoTimeMs = modv (tEchoTime, lfo);
-                fp.echoFb = modv (tEchoFb, lfo) / 100.0f;
-                fp.echoTone = modv (tEchoTone, lfo) / 100.0f;
-                fp.cutHz = modv (tFltCut, lfo);
-                fp.res = modv (tFltRes, lfo) / 100.0f;
-                fp.type = modv (tFltType, lfo) / 100.0f;
-                fp.blur = modv (tSpBlur, lfo) / 100.0f;
-                fp.shiftSt = modv (tSpShift, lfo);
-                fp.thin = modv (tSpThin, lfo) / 100.0f;
+                static const ModSystem noRoutes;
+                const auto fp = makeFxParams (job.fx, job.mod != nullptr ? *job.mod : noRoutes, job.base.data(), lfo, &job.routes);
                 fx.process (L.data() + o, R.data() + o, n, fp);
                 const float wet = modv (tReverb, lfo) / 100.0f;
                 const float g = juce::Decibels::decibelsToGain (modv (tGain, lfo), -100.0f) / juce::jmax (1.0e-6f, baseGain);

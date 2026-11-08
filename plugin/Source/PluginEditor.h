@@ -78,6 +78,9 @@ public:
     void paintOverChildren (juce::Graphics&) override;
     void resized() override;
     const ControlSpec& getSpec() const { return spec; }
+    int getTarget() const { return target; }
+    /** 0 = not on the pad, 1 = driven by pad X, 2 = by pad Y. */
+    void setPadAxis (int axis);
 
     bool isInterestedInDragSource (const SourceDetails& d) override { return target >= 0 && lfoFromDescription (d.description) >= 0; }
     void itemDragEnter (const SourceDetails&) override { dropHover = true; repaint(); }
@@ -99,6 +102,7 @@ private:
     std::unique_ptr<ChipStrip> chips;
     double shown = std::numeric_limits<double>::quiet_NaN();
     bool dragging = false, updating = false, edited = false, dropHover = false;
+    int padAxis = 0;
 };
 
 } // namespace ss
@@ -129,6 +133,10 @@ private:
     void startExport();
     void setStatus (const juce::String& s, bool error = false, int holdMs = 5000);
     void showTab (int t);
+    void syncFxControls (bool force = false);
+    void setChoice (const char* id, int index);
+    void chooseSlot (int slot, int type);
+    ss::ControlRow* fxRow (const juce::String& id) const;
     juce::String exportFileName (const juce::String& ext) const;
 
     SlowSippinProcessor& proc;
@@ -144,6 +152,10 @@ private:
     ss::XYPad xy;
     ss::ChipStrip xChips, yChips;
     juce::OwnedArray<ss::LfoTile> lfos;
+    juce::ComboBox slotA, slotB, padXBox, padYBox;
+    juce::TextButton seriesBtn { "SERIES" }, parallelBtn { "PARALLEL" };
+    juce::Rectangle<int> slotAHead, slotBHead, routeLabel, xLabel, yLabel;
+    int fxKey = -1;
     juce::OwnedArray<juce::ToggleButton> toggles;
     juce::OwnedArray<juce::ButtonParameterAttachment> toggleAtts;
     std::unique_ptr<juce::FileChooser> chooser;

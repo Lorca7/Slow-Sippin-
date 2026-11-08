@@ -61,6 +61,7 @@ public:
 
     // ---- export
     ss::OfflineSettings offlineSettings() const;
+    ss::FxSetup currentFxSetup() const noexcept;
     ss::Exporter exporter;
     int exportFormat = 0, exportBits = 24;     // remembered with the session
     int uiTab = 0;                             // ENGINE / EFFECTS, remembered with the session
@@ -80,6 +81,21 @@ public:
         return mod.apply (target, targetParam[(size_t) target]->load(), lfo);
     }
     void lfoValuesNow (float* out) const noexcept { mod.lfoValuesAt (audioClock.load(), out); }
+    /** What a target is actually at right now: XY-pad mapping (if any) + LFOs. */
+    float effectiveValue (int target) const noexcept
+    {
+        float lfo[ss::kNumLfos];
+        mod.lfoValuesAt (audioClock.load(), lfo);
+        const auto s = currentFxSetup();
+        float b = targetParam[(size_t) target]->load();
+        for (int axis = 0; axis < 2; ++axis)
+            if ((axis == 0 ? s.padX : s.padY) == target)
+            {
+                const int at = axis == 0 ? ss::tFxX : ss::tFxY;
+                b = mod.fromNorm (target, juce::jlimit (0.0f, 1.0f, mod.apply (at, targetParam[(size_t) at]->load(), lfo) / 100.0f));
+            }
+        return mod.apply (target, b, lfo);
+    }
 
     juce::AudioProcessorValueTreeState apvts;
     juce::AudioFormatManager formats;

@@ -165,8 +165,8 @@ int main()
         std::printf ("fx mix 0: max difference from dry %.1e\n", diff);
         CHECK (diff == 0, "fx mix 0 must be bit-exact dry");
 
-        // filter corner (x=0,y=0), LP at 300 Hz: 4 kHz is cut, 100 Hz passes
-        p = FxParams(); p.mix = 1; p.x = 0; p.y = 0; p.cutHz = 300; p.res = 0; p.type = 0;
+        // filter alone in slot A, LP at 300 Hz: 4 kHz is cut, 100 Hz passes
+        p = FxParams(); p.mix = 1; p.typeA = 2; p.typeB = -1; p.cutHz = 300; p.res = 0; p.type = 0;
         runFx (p, mk (4000, 0.5f), L, R);
         const double hi = rms (L, (size_t) fs, (size_t) (2 * fs));
         runFx (p, mk (100, 0.5f), L, R);
@@ -179,8 +179,8 @@ int main()
         std::printf ("filter HP 300 Hz: 100 Hz rms %.3f\n", hpLo);
         CHECK (hpLo < 0.08, "high-pass filter");
 
-        // echo corner (x=1,y=1): a click comes back after TIME
-        p = FxParams(); p.mix = 1; p.x = 1; p.y = 1; p.echoTimeMs = 250; p.echoFb = 0.5f; p.echoTone = 1;
+        // echo alone: a click comes back after TIME
+        p = FxParams(); p.mix = 1; p.typeA = 1; p.typeB = -1; p.echoTimeMs = 250; p.echoFb = 0.5f; p.echoTone = 1;
         std::vector<float> click ((size_t) n, 0.0f); click[1000] = 1.0f;
         runFx (p, click, L, R);
         int first = -1; for (int i = 1001; i < n; ++i) if (std::abs (L[(size_t) i]) > 0.05f) { first = i; break; }
@@ -188,14 +188,14 @@ int main()
         std::printf ("dub echo 250 ms: repeats at +%.0f ms and +%.0f ms\n", (first - 1000) / 48.0, (second - 1000) / 48.0);
         CHECK (std::abs ((first - 1000) / 48.0 - 250) < 6 && std::abs ((second - 1000) / 48.0 - 500) < 12, "echo timing and feedback");
 
-        // chorus corner (x=0,y=1): same pitch, modulated
-        p = FxParams(); p.mix = 1; p.x = 0; p.y = 1; p.chDepth = 1;
+        // chorus alone: same pitch, modulated
+        p = FxParams(); p.mix = 1; p.typeA = 0; p.typeB = -1; p.chDepth = 1;
         runFx (p, tone, L, R);
         std::printf ("chorus: rms %.3f, freq %.1f Hz\n", rms (L, (size_t) fs, (size_t) (2 * fs)), zcFreq (L, (size_t) fs, (size_t) (2 * fs), fs));
         CHECK (std::abs (zcFreq (L, (size_t) fs, (size_t) (2 * fs), fs) - 440) < 8, "chorus keeps pitch");
 
-        // spectral corner (x=1,y=0): +12 st shift doubles the frequency
-        p = FxParams(); p.mix = 1; p.x = 1; p.y = 0; p.blur = 0; p.shiftSt = 12;
+        // spectral alone: +12 st shift doubles the frequency
+        p = FxParams(); p.mix = 1; p.typeA = 3; p.typeB = -1; p.blur = 0; p.shiftSt = 12;
         runFx (p, tone, L, R);
         const double sf = zcFreq (L, (size_t) fs, (size_t) (2 * fs), fs);
         std::printf ("spectral +12 st: %.1f Hz (expect 880), rms %.3f\n", sf, rms (L, (size_t) fs, (size_t) (2 * fs)));
@@ -205,13 +205,37 @@ int main()
         std::printf ("spectral identity: rms %.3f (in 0.354)\n", rms (L, (size_t) fs, (size_t) (2 * fs)));
         CHECK (std::abs (rms (L, (size_t) fs, (size_t) (2 * fs)) - 0.354) < 0.03, "spectral identity level");
 
-        // centre of the pad, everything at once with extreme settings: stays finite and bounded
-        p = FxParams(); p.mix = 1; p.x = 0.5f; p.y = 0.5f; p.echoFb = 1.1f; p.res = 1; p.blur = 1; p.thin = 1; p.shiftSt = -24;
-        runFx (p, tone, L, R);
-        float pk = 0; bool fin = true;
-        for (int i = 0; i < n; ++i) { fin = fin && std::isfinite (L[(size_t) i]) && std::isfinite (R[(size_t) i]); pk = std::max (pk, std::abs (L[(size_t) i])); }
-        std::printf ("all four at once, extreme settings: finite %d, peak %.2f\n", (int) fin, pk);
-        CHECK (fin && pk < 20, "extreme settings stay bounded");
+        // parallel A/B balance: A = filter (LP 300 Hz), B = echo; a 4 kHz tone
+        p = FxParams(); p.mix = 1; p.typeA = 2; p.typeB = 1; p.series = false; p.cutHz = 300; p.res = 0; p.echoTone = 1; p.echoFb = 0;
+        p.balance = 0;
+        runFx (p, mk (4000, 0.5f), L, R);
+        const double balA = rms (L, (size_t) fs, (size_t) (2 * fs));
+        p.balance = 1;
+        runFx (p, mk (4000, 0.5f), L, R);
+        const double balB = rms (L, (size_t) fs, (size_t) (2 * fs));
+        std::printf ("parallel filter|echo on 4 kHz: balance A %.4f, balance B %.3f\n", balA, balB);
+        CHECK (balA < 0.01 && balB > 0.2, "parallel balance picks A or B");
+
+        // series: filter → echo; the echo only ever hears what the filter let through
+        p = FxParams(); p.mix = 1; p.typeA = 2; p.typeB = 1; p.series = true; p.cutHz = 300; p.res = 0; p.echoFb = 0.5f;
+        runFx (p, mk (4000, 0.5f), L, R);
+        const double ser = rms (L, (size_t) fs, (size_t) (2 * fs));
+        std::printf ("series filter -> echo on 4 kHz: %.4f\n", ser);
+        CHECK (ser < 0.01, "series runs A into B");
+
+        // every pair, both routings, extreme settings: stays finite and bounded
+        float worst = 0; bool fin = true;
+        for (int a = 0; a < 4; ++a)
+            for (int b = 0; b < 4; ++b)
+                for (int ser2 = 0; ser2 < 2; ++ser2)
+                {
+                    p = FxParams(); p.mix = 1; p.typeA = a; p.typeB = b; p.series = ser2 == 0;
+                    p.echoFb = 1.1f; p.res = 1; p.blur = 1; p.thin = 1; p.shiftSt = -24; p.chDepth = 1;
+                    runFx (p, tone, L, R);
+                    for (int i = 0; i < n; ++i) { fin = fin && std::isfinite (L[(size_t) i]); worst = std::max (worst, std::abs (L[(size_t) i])); }
+                }
+        std::printf ("all 32 slot/routing combinations at extreme settings: finite %d, peak %.2f\n", (int) fin, worst);
+        CHECK (fin && worst < 20, "extreme settings stay bounded");
     }
 
     std::printf (failures ? "\n%d FAILURE(S)\n" : "\nall engine tests passed\n", failures);

@@ -49,12 +49,29 @@ static Stats render (juce::AudioPluginInstance& p, double seconds, juce::MidiBuf
     return s;
 }
 
+static void setChoiceParam (juce::AudioPluginInstance& p, const juce::String& name, int index)
+{
+    for (auto* prm : p.getParameters())
+        if (prm->getName (64).equalsIgnoreCase (name))
+        {
+            const int steps = juce::jmax (2, prm->getNumSteps());
+            prm->setValueNotifyingHost ((float) index / (float) (steps - 1));
+            return;
+        }
+    check (false, "choice parameter not found: " + name);
+}
+
 static void setParam (juce::AudioPluginInstance& p, const juce::String& name, float value)
 {
     for (auto* prm : p.getParameters())
         if (prm->getName (64).equalsIgnoreCase (name))
             if (auto* r = dynamic_cast<juce::HostedAudioProcessorParameter*> (prm))
             {
+                if (prm->isBoolean() || prm->getNumSteps() == 2)     // switches show "On"/"Off", not numbers
+                {
+                    prm->setValueNotifyingHost (value > 0.5f ? 1.0f : 0.0f);
+                    return;
+                }
                 // hosted params speak 0..1: search the normalised value whose text matches
                 float best = 0, bestErr = 1e9f;
                 for (int i = 0; i <= 4000; ++i)
@@ -174,6 +191,7 @@ int main (int argc, char** argv)
         for (const auto& c : ss::controlSpecs()) ours.add (ss::hostName (c));
         for (const auto& t : ss::toggleSpecs()) ours.add (juce::String::fromUTF8 (t.label));
         for (int i = 0; i < ss::kNumLfos; ++i) ours.add ("LFO " + juce::String (i + 1) + " SHAPE");
+        ours.addArray ({ "FX SLOT A", "FX SLOT B", "FX ROUTING", "PAD X CONTROLS", "PAD Y CONTROLS" });
         juce::Array<juce::AudioProcessorParameter*> ps;
         for (auto* prm : inst->getParameters()) if (ours.contains (prm->getName (64))) ps.add (prm);
         check (ps.size() == ours.size(), "found all " + juce::String (ours.size()) + " parameters (" + juce::String (ps.size()) + ")");
@@ -199,23 +217,49 @@ int main (int argc, char** argv)
         render (*inst, 0.1);
     }
 
-    std::printf ("effects in the plugin (FX MIX 100, all four corners):\n");
+    std::printf ("effects in the plugin (two slots, series and parallel):\n");
     {
         juce::MidiBuffer bOn; bOn.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 0);
         const double dryRms = render (*inst, 2.0, bOn).rms;
         render (*inst, 0.3, allOff);
         std::printf ("    dry (FX MIX 0): rms %.3f\n", dryRms);
         setParam (*inst, "FX MIX", 100.0f);
-        for (auto xy : { std::pair<float, float> { 0, 100 }, { 100, 100 }, { 0, 0 }, { 100, 0 }, { 50, 50 } })
+        setChoiceParam (*inst, "PAD X CONTROLS", 0);      // pad off: the effects use their own settings
+        setChoiceParam (*inst, "PAD Y CONTROLS", 0);
+        const char* names[] = { "chorus", "echo", "filter", "spectral" };
+        for (auto ab : { std::pair<int, int> { 2, 1 }, { 0, 3 }, { 1, 0 }, { 3, 2 } })
+            for (int route = 0; route < 2; ++route)
+            {
+                setChoiceParam (*inst, "FX SLOT A", ab.first);
+                setChoiceParam (*inst, "FX SLOT B", ab.second);
+                setChoiceParam (*inst, "FX ROUTING", route);
+                juce::MidiBuffer nOn; nOn.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 0);
+                const auto st = render (*inst, 2.0, nOn);
+                render (*inst, 0.3, allOff);
+                check (st.finite && st.rms > 0.005 && st.peak <= 1.0f, juce::String (names[ab.first]) + (route == 0 ? " -> " : " | ") + names[ab.second]
+                       + ": rms " + juce::String (st.rms, 3) + ", peak " + juce::String (st.peak, 3));
+            }
+
+        // the pad plays what its axes are mapped to: X -> filter cutoff
+        setChoiceParam (*inst, "FX SLOT A", 2);
+        setChoiceParam (*inst, "FX SLOT B", 3);
+        setChoiceParam (*inst, "FX ROUTING", 1);           // parallel ...
+        setParam (*inst, "FX A / B BALANCE", 0.0f);        // ... all A: only the filter is heard
+        setParam (*inst, "FILTER RESONANCE", 0.0f);
+        setChoiceParam (*inst, "PAD X CONTROLS", 7);       // FILTER CUTOFF
+        auto atX = [&] (float x)
         {
-            setParam (*inst, "FX X", xy.first);
-            setParam (*inst, "FX Y", xy.second);
+            setParam (*inst, "PAD X", x);
             juce::MidiBuffer nOn; nOn.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 0);
-            const auto st = render (*inst, 2.0, nOn);
+            render (*inst, 0.5, nOn);
+            const double r = render (*inst, 1.5).rms;
             render (*inst, 0.3, allOff);
-            check (st.finite && st.rms > 0.01 && st.peak <= 1.0f, "pad at " + juce::String (xy.first, 0) + "," + juce::String (xy.second, 0)
-                   + ": rms " + juce::String (st.rms, 3) + " (" + juce::String (juce::Decibels::gainToDecibels (st.rms / dryRms), 1) + " dB vs dry), peak " + juce::String (st.peak, 3));
-        }
+            return r;
+        };
+        const double closed = atX (0.0f), open = atX (100.0f);
+        std::printf ("    pad X -> FILTER CUTOFF: X=0 rms %.4f, X=100 rms %.3f\n", closed, open);
+        check (open > 10.0 * closed, "moving pad X plays the filter cutoff");
+        setChoiceParam (*inst, "PAD X CONTROLS", 0);
         setParam (*inst, "FX MIX", 0.0f);
         render (*inst, 1.0);
     }
@@ -273,13 +317,14 @@ int main (int argc, char** argv)
             setParam (*inst, "SCATTER", 0.0f);
             setParam (*inst, "LFO 1", 0.25f);
             setParam (*inst, "NORMALIZE", 0.0f);
+            setParam (*inst, "LOOP", 1.0f);      // keep playing for the whole measurement
             pump (300);
         };
         auto segments = [&] (int& lo, int& hi)
         {
             std::vector<float> w;
             juce::MidiBuffer nOn; nOn.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 0);
-            render (*inst, 10.0, nOn, &w);
+            render (*inst, 16.0, nOn, &w);     // four full sweeps, whatever phase the free-running LFO is at
             render (*inst, 0.3, allOff);
             lo = hi = 0;
             const size_t seg = 12000;
@@ -359,14 +404,15 @@ int main (int argc, char** argv)
         os.data = data;
         for (int t = 0; t < ss::kNumTargets; ++t) os.base[(size_t) t] = ss::findSpec (ss::targetParamId (t))->def;
         os.base[ss::tStretch] = 4;
-        os.base[ss::tFxMix] = 100; os.base[ss::tFxX] = 100; os.base[ss::tFxY] = 100;   // dub echo
+        os.base[ss::tFxMix] = 100; os.base[ss::tFxX] = 100; os.base[ss::tFxY] = 60;   // filter (open) -> dub echo, pad Y = feedback 66 %
         os.base[ss::tEchoFb] = 70;
         os.stream.stretch = 4; os.stream.scatter = 1; os.stream.weave = 4;
         os.regionA = 0; os.regionB = data->length / 3;
         for (int i = 0; i < ss::kNumLfos; ++i) { os.lfoRate[i] = 0.5f; os.lfoShape[i] = ss::Sine; }
         mod.addRoute (0, ss::tFltCut, 0.5f);
         mod.addRoute (1, ss::tWindow, 0.6f);
-        mod.addRoute (2, ss::tFxX, -0.4f);
+        mod.addRoute (2, ss::tFxX, -0.3f);
+        os.fx.typeA = ss::FxFilter; os.fx.typeB = ss::FxEcho; os.fx.series = true; os.fx.padX = ss::tFltCut; os.fx.padY = ss::tEchoFb;
         os.routes = mod.snapshotRoutes();
         os.mod = &mod;
         ss::Exporter ex;

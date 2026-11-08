@@ -137,11 +137,12 @@ public:
     {
         const float cy = y + h * 0.5f;
         const float tw = 11.0f, th = juce::jmin (26.0f, (float) h - 2.0f);
-        g.setColour (Colours::ink2);
+        const float a = s.isEnabled() ? 1.0f : 0.3f;
+        g.setColour (Colours::ink2.withMultipliedAlpha (a));
         g.fillRect ((float) x, cy - 0.5f, (float) w, 1.0f);
-        g.setColour (Colours::line);
+        g.setColour (Colours::line.withMultipliedAlpha (a));
         g.fillRect ((float) x, cy - 1.5f, pos - x, 3.0f);
-        g.setColour (s.isMouseOverOrDragging() ? Colours::red.darker (0.12f) : Colours::red);
+        g.setColour ((s.isMouseOverOrDragging() ? Colours::red.darker (0.12f) : Colours::red).withMultipliedAlpha (a));
         g.fillRect (juce::jlimit ((float) x, (float) (x + w) - tw, pos - tw * 0.5f), cy - th * 0.5f, tw, th);
     }
 

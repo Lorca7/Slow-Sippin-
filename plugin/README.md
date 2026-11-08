@@ -54,17 +54,24 @@ There's no Render step: the stretch is computed live, so every control can be ch
 
 ### Effects (EFFECTS tab)
 
-The right-hand panel has two tabs. **EFFECTS** holds four effects that run in parallel:
+The right-hand panel has two tabs. **EFFECTS** has two effect slots, **SLOT A** and **SLOT B**. Pick any two of:
 
-| Corner | Effect | Controls |
-|---|---|---|
-| top-left | **Chorus** | Rate, Depth: three slowly detuned voices |
-| top-right | **Dub Echo** | Time, Feedback (above 100 % it self-oscillates, safely saturated), Tone. It runs through a tape-style loop: darkening tone filter, saturation, gentle wow, and pitch glide when the time changes |
-| bottom-left | **Filter** | Cutoff, Resonance, LP > BP > HP (morphs from low-pass through band-pass to high-pass) |
-| bottom-right | **Spectral** | Blur (smears the spectrum over time), Shift (moves partials ±24 semitones), Thin (keeps only the strongest partials) |
+| Effect | Controls |
+|---|---|
+| **Chorus** | Rate, Depth: three slowly detuned voices |
+| **Dub Echo** | Time, Feedback (above 100 % it self-oscillates, safely saturated), Tone. It runs through a tape-style loop: darkening tone filter, saturation, gentle wow, and pitch glide when the time changes |
+| **Filter** | Cutoff, Resonance, LP > BP > HP (morphs from low-pass through band-pass to high-pass) |
+| **Spectral** | Blur (smears the spectrum over time), Shift (moves partials ±24 semitones), Thin (keeps only the strongest partials) |
 
-- **The XY pad cross-blends them.** At a corner you hear that one effect; in between you hear a mix, and the centre is all four equally. Double-click the pad to recentre it.
-- **FX MIX** is the dry/wet knob for the whole effects blend. At 0 the effects are bypassed entirely and the sound is bit-identical to dry.
+Picking the effect that's already in the other slot swaps the two. Only the controls of the two chosen effects are shown.
+
+- **ROUTING:** **SERIES** feeds A into B (e.g. filter → dub echo). **PARALLEL** runs them side by side, mixed by **A / B BALANCE**.
+- **FX MIX** is the dry/wet for the effects. At 0 they're bypassed, and the sound is bit-identical to dry.
+- **The XY pad plays the two parameters you choose.** Use the **X →** and **Y →** menus under the pad to pick any parameter of the two chosen effects, or A / B Balance in parallel mode. The default is X = Filter Cutoff, Y = Echo Feedback.
+  - Moving the puck sweeps each parameter across its full range. The pad's edges show what each axis plays and its value right now.
+  - A parameter played by the pad gets a red **X** or **Y** badge, and its own slider dims. The box shows what the pad is playing. Set the axis to OFF to hand the parameter back to its slider.
+  - Double-click the pad to centre it.
+- Drop an LFO on the pad (choose X, Y or both) to move it automatically. You can also route LFOs to the effect parameters themselves.
 - Effects come after the stretch and before the reverb.
 
 ### Modulation: 8 LFOs
@@ -104,9 +111,9 @@ Every push that touches `plugin/` runs `.github/workflows/build-mac.yml` on a ma
 ## Inside
 
 - `Source/StretchEngine.*` is the streaming spectral stretcher: phase vocoder with identity phase locking blended into random phase, peak-region pitch shifting, and drift. It also contains the reverb impulse and the FFT convolution. It has no JUCE dependency, and `Tests/EngineTests.cpp` tests it.
-- `Source/Effects.*`: chorus, filter, dub echo and spectral effects, and the XY blend with FX MIX. No JUCE dependency; tested in `Tests/EngineTests.cpp`.
+- `Source/Effects.*`: chorus, filter, dub echo and spectral effects, with the two-slot chain (series or parallel) and FX MIX. No JUCE dependency; tested in `Tests/EngineTests.cpp`.
 - `Source/Modulation.h`: the 8 LFOs and the routing table. LFOs are pure functions of time, so the render threads, which work about 100 ms ahead of what you hear, evaluate them at exactly the moment their audio will play.
-- `Source/ModUI.h`: LFO tiles, route chips and the XY pad.
+- `Source/ModUI.h`: LFO tiles, route chips and the XY pad. `makeFxParams` in `Source/Offline.h` applies the pad's axis mapping, so playback and export use the same rules.
 - `Source/VoiceEngine.*` holds the 8 polyphonic voices. Each voice renders about 100 ms ahead on background threads into a lock-free FIFO, so the bursty FFT work never lands on the audio thread.
 - `Source/Offline.*` contains the Normalize analyzer, the file export and the WAV/AIFF writer.
 - `Source/PluginProcessor.*` handles parameters, MIDI, transport, audition, reverb, the limiter and saved state. `Source/PluginEditor.*` and `Source/Look.h` are the UI.

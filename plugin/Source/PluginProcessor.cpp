@@ -34,6 +34,7 @@ SlowSippinProcessor::SlowSippinProcessor()
     formats.registerBasicFormats();
     for (const auto& c : ss::controlSpecs()) params[c.id] = apvts.getRawParameterValue (c.id);
     for (const auto& t : ss::toggleSpecs()) params[t.id] = apvts.getRawParameterValue (t.id);
+    for (const char* id : { "fxA", "fxB", "fxRoute", "padX", "padY" }) params[id] = apvts.getRawParameterValue (id);
     engine.shared = &shared;
     shared.mod = &mod;
     for (int t = 0; t < ss::kNumTargets; ++t) targetParam[(size_t) t] = apvts.getRawParameterValue (ss::targetParamId (t));
@@ -198,6 +199,7 @@ void SlowSippinProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     const float pk = analyzer.peak();
     sNorm.setTargetValue (normalize && pk > 1e-6f ? juce::jmin (100.0f, kNormTarget / pk) : 1.0f);
 
+    const auto fxSetup = currentFxSetup();
     for (int off = 0; off < n; off += maxBlock)
     {
         const int len = juce::jmin (maxBlock, n - off);
@@ -209,21 +211,9 @@ void SlowSippinProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
             float lfo[ss::kNumLfos];
             mod.lfoValuesAt (clock + off + c, lfo);
             auto mv = [&] (int t) { return mod.apply (t, targetParam[(size_t) t]->load(), lfo); };
-            ss::FxParams fp;
-            fp.mix = mv (ss::tFxMix) / 100.0f;
-            fp.x = mv (ss::tFxX) / 100.0f;
-            fp.y = mv (ss::tFxY) / 100.0f;
-            fp.chRate = mv (ss::tChRate);
-            fp.chDepth = mv (ss::tChDepth) / 100.0f;
-            fp.echoTimeMs = mv (ss::tEchoTime);
-            fp.echoFb = mv (ss::tEchoFb) / 100.0f;
-            fp.echoTone = mv (ss::tEchoTone) / 100.0f;
-            fp.cutHz = mv (ss::tFltCut);
-            fp.res = mv (ss::tFltRes) / 100.0f;
-            fp.type = mv (ss::tFltType) / 100.0f;
-            fp.blur = mv (ss::tSpBlur) / 100.0f;
-            fp.shiftSt = mv (ss::tSpShift);
-            fp.thin = mv (ss::tSpThin) / 100.0f;
+            float base[ss::kNumTargets];
+            for (int t = 0; t < ss::kNumTargets; ++t) base[t] = targetParam[(size_t) t]->load();
+            const auto fp = ss::makeFxParams (fxSetup, mod, base, lfo, nullptr);
             chunkWet[(size_t) nc] = mv (ss::tReverb) / 100.0f;
             chunkGain[(size_t) nc] = juce::Decibels::decibelsToGain (mv (ss::tGain), -100.0f);
             if (chunkWet[(size_t) nc] > 0.0f) anyWet = true;
@@ -461,7 +451,19 @@ ss::OfflineSettings SlowSippinProcessor::offlineSettings() const
     s.mod = &mod;
     const float pk = analyzer.peak();
     s.preGain = s.normalize && pk > 1e-6f ? juce::jmin (100.0f, kNormTarget / pk) : 1.0f;
+    s.fx = currentFxSetup();
     return s;
+}
+
+ss::FxSetup SlowSippinProcessor::currentFxSetup() const noexcept
+{
+    ss::FxSetup f;
+    f.typeA = juce::jlimit (0, ss::kNumFxTypes - 1, (int) std::lround (param ("fxA")));
+    f.typeB = juce::jlimit (0, ss::kNumFxTypes - 1, (int) std::lround (param ("fxB")));
+    f.series = param ("fxRoute") < 0.5f;
+    f.padX = ss::padChoiceToTarget ((int) std::lround (param ("padX")));
+    f.padY = ss::padChoiceToTarget ((int) std::lround (param ("padY")));
+    return f;
 }
 
 // ----------------------------------------------------------------- state --

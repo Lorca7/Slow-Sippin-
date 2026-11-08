@@ -389,14 +389,33 @@ void ControlRow::apply (double v)
 void ControlRow::refresh()
 {
     if (chips != nullptr && chips->sync()) resized();
-    const bool modulated = target >= 0 && proc.getMod().hasRoutesFor (target);
+    const bool modulated = target >= 0 && (padAxis != 0 || proc.getMod().hasRoutesFor (target));
     if (modulated) repaint();
+    if (padAxis != 0 && ! edited)
+    {
+        // played by the pad: the (read-only) box shows what the pad is playing
+        const double ev = proc.effectiveValue (target);
+        box.setText (fmtDec (ev, decimalsFor (ev)), false);
+        shown = std::numeric_limits<double>::quiet_NaN();
+        return;
+    }
     const double v = current();
     if (v == shown) return;
     shown = v;
     const juce::ScopedValueSetter<bool> svs (updating, true);
     if (! dragging) slider.setValue (specToPos (spec, v), juce::dontSendNotification);
-    if (! edited) box.setText (juce::String (v, decimalsFor (v)), false);
+    if (! edited) box.setText (fmtDec (v, decimalsFor (v)), false);
+    repaint();
+}
+
+void ControlRow::setPadAxis (int axis)
+{
+    if (axis == padAxis) return;
+    padAxis = axis;
+    slider.setEnabled (axis == 0);
+    box.setEnabled (axis == 0);
+    slider.setTooltip (axis == 0 ? juce::String::fromUTF8 (spec.label).toLowerCase() + ": drag, double-click to reset"
+                                 : "played by the XY pad (" + juce::String (axis == 1 ? "X" : "Y") + " axis) - change the pad's axis to free it");
     repaint();
 }
 
@@ -435,9 +454,21 @@ void ControlRow::paint (juce::Graphics& g)
         const float cy = hasChips ? labelR.getBottom() - 8.0f : getHeight() * 0.5f - 2.5f;
         g.fillEllipse (tw + 7.0f, cy, 5.0f, 5.0f);
     }
+    if (padAxis != 0)
+    {
+        // small red badge: this parameter is played by the pad's X or Y axis
+        const float tw = juce::GlyphArrangement::getStringWidth (lf, label);
+        const float cy = hasChips ? labelR.getBottom() - 9.0f : getHeight() * 0.5f;
+        const juce::Rectangle<float> badge (tw + 8.0f, cy - 7.0f, 16.0f, 14.0f);
+        g.setColour (Colours::red);
+        g.fillRoundedRectangle (badge, 3.0f);
+        g.setColour (Colours::redInk);
+        g.setFont (Fonts::sans (10.0f, Fonts::Bold, 0.0f));
+        g.drawText (padAxis == 1 ? "X" : "Y", badge, juce::Justification::centred);
+    }
     if (compact) return;
 
-    const juce::String num = juce::String (shown, decimalsFor (shown));
+    const juce::String num = fmtDec (shown, decimalsFor (shown));
     auto big = Fonts::mono (juce::jlimit (18.0f, 27.0f, getHeight() * 0.56f), Fonts::Light, 0.03f);
     g.setFont (big);
     g.setColour (Colours::ink);
@@ -451,10 +482,10 @@ void ControlRow::paint (juce::Graphics& g)
 
 void ControlRow::paintOverChildren (juce::Graphics& g)
 {
-    if (target < 0 || ! proc.getMod().hasRoutesFor (target)) return;
-    // live modulated value: a line from the base value to a ring at the current value
+    if (target < 0 || (padAxis == 0 && ! proc.getMod().hasRoutesFor (target))) return;
+    // live value (pad and/or LFOs): a line from the slider's own value to a ring at the actual value
     const double base = current();
-    const double v = proc.modulatedValue (target);
+    const double v = proc.effectiveValue (target);
     const float y = (float) slider.getBounds().getCentreY();
     const float xb = (float) slider.getX() + (float) slider.getPositionOfValue (specToPos (spec, base));
     const float xm = (float) slider.getX() + (float) slider.getPositionOfValue (specToPos (spec, v));
@@ -531,6 +562,34 @@ SlowSippinEditor::SlowSippinEditor (SlowSippinProcessor& p)
     addChildComponent (xy);
     addChildComponent (xChips);
     addChildComponent (yChips);
+    for (auto* cb : { &slotA, &slotB })
+    {
+        cb->addItemList (ss::fxTypeNames(), 1);
+        cb->setScrollWheelEnabled (false);
+        addChildComponent (cb);
+    }
+    slotA.onChange = [this] { if (slotA.getSelectedId() > 0) chooseSlot (0, slotA.getSelectedId() - 1); };
+    slotB.onChange = [this] { if (slotB.getSelectedId() > 0) chooseSlot (1, slotB.getSelectedId() - 1); };
+    slotA.setTooltip ("Effect in slot A. Picking the effect that is in slot B swaps them.");
+    slotB.setTooltip ("Effect in slot B. Picking the effect that is in slot A swaps them.");
+    for (auto* cb : { &padXBox, &padYBox })
+    {
+        cb->setScrollWheelEnabled (false);
+        addChildComponent (cb);
+    }
+    padXBox.onChange = [this] { if (padXBox.getSelectedId() > 0) setChoice ("padX", padXBox.getSelectedId() - 1); };
+    padYBox.onChange = [this] { if (padYBox.getSelectedId() > 0) setChoice ("padY", padYBox.getSelectedId() - 1); };
+    padXBox.setTooltip ("What moving the pad left/right plays");
+    padYBox.setTooltip ("What moving the pad up/down plays");
+    for (auto* b : { &seriesBtn, &parallelBtn })
+    {
+        b->setClickingTogglesState (false);
+        addChildComponent (b);
+    }
+    seriesBtn.onClick = [this] { setChoice ("fxRoute", 0); };
+    parallelBtn.onClick = [this] { setChoice ("fxRoute", 1); };
+    seriesBtn.setTooltip ("A feeds into B");
+    parallelBtn.setTooltip ("A and B side by side, mixed by A / B BALANCE");
     for (auto* t : { &engineTab, &fxTab })
     {
         t->setClickingTogglesState (false);
@@ -568,12 +627,92 @@ void SlowSippinEditor::showTab (int t)
     proc.uiTab = t;
     for (auto* r : rows) r->setVisible (t == 0);
     for (auto* b : toggles) b->setVisible (t == 0);
-    for (auto* r : fxRows) r->setVisible (t == 1);
-    xy.setVisible (t == 1);
-    xChips.setVisible (t == 1);
-    yChips.setVisible (t == 1);
+    for (auto* c : std::initializer_list<juce::Component*> { &xy, &xChips, &yChips, &slotA, &slotB, &padXBox, &padYBox, &seriesBtn, &parallelBtn })
+        c->setVisible (t == 1);
+    syncFxControls (true);
     engineTab.setToggleState (t == 0, juce::dontSendNotification);
     fxTab.setToggleState (t == 1, juce::dontSendNotification);
+    repaint();
+}
+
+ss::ControlRow* SlowSippinEditor::fxRow (const juce::String& id) const
+{
+    for (auto* r : fxRows) if (id == r->getSpec().id) return r;
+    return nullptr;
+}
+
+void SlowSippinEditor::setChoice (const char* id, int index)
+{
+    if (auto* p = proc.apvts.getParameter (id))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost (p->convertTo0to1 ((float) index));
+        p->endChangeGesture();
+    }
+    syncFxControls (true);
+}
+
+void SlowSippinEditor::chooseSlot (int slot, int type)
+{
+    const auto s = proc.currentFxSetup();
+    const int mine = slot == 0 ? s.typeA : s.typeB, other = slot == 0 ? s.typeB : s.typeA;
+    if (type == mine) return;
+    if (type == other) setChoice (slot == 0 ? "fxB" : "fxA", mine);     // swap rather than doubling up
+    setChoice (slot == 0 ? "fxA" : "fxB", type);
+}
+
+void SlowSippinEditor::syncFxControls (bool force)
+{
+    const auto s = proc.currentFxSetup();
+    const int px = ss::targetToPadChoice (s.padX), py = ss::targetToPadChoice (s.padY);
+    const int key = s.typeA + 4 * s.typeB + 16 * (s.series ? 0 : 1) + 32 * px + 32 * 16 * py;
+
+    // which rows are played by the pad (cheap, every tick)
+    for (auto* r : fxRows)
+        r->setPadAxis (r->getTarget() >= 0 && r->getTarget() == s.padX ? 1 : r->getTarget() >= 0 && r->getTarget() == s.padY ? 2 : 0);
+
+    if (key == fxKey && ! force) return;
+    fxKey = key;
+    slotA.setSelectedId (s.typeA + 1, juce::dontSendNotification);
+    slotB.setSelectedId (s.typeB + 1, juce::dontSendNotification);
+    seriesBtn.setToggleState (s.series, juce::dontSendNotification);
+    parallelBtn.setToggleState (! s.series, juce::dontSendNotification);
+
+    // the pad's axis menus offer the parameters of the two chosen effects
+    const auto names = ss::padChoiceNames();
+    for (int axis = 0; axis < 2; ++axis)
+    {
+        auto& cb = axis == 0 ? padXBox : padYBox;
+        const int cur = axis == 0 ? px : py;
+        cb.clear (juce::dontSendNotification);
+        cb.addItem ("OFF", 1);
+        if (! s.series) cb.addItem (names[1], 2);
+        for (int slot = 0; slot < 2; ++slot)
+        {
+            const int type = slot == 0 ? s.typeA : s.typeB;
+            cb.addSectionHeading (juce::String (slot == 0 ? "A: " : "B: ") + ss::fxTypeNames()[type]);
+            for (int t : ss::fxTypeTargets (type))
+            {
+                const int c = ss::targetToPadChoice (t);
+                cb.addItem (names[c], c + 1);
+            }
+        }
+        if (cb.indexOfItemId (cur + 1) < 0) cb.addItem (names[cur] + "  (inactive)", cur + 1);
+        cb.setSelectedId (cur + 1, juce::dontSendNotification);
+    }
+
+    // show only the two chosen effects' controls
+    const bool fxTabOn = tab == 1;
+    for (auto* r : fxRows)
+    {
+        const juce::String id (r->getSpec().id);
+        const int k = ss::fxTypeOfTarget (r->getTarget());
+        bool show = fxTabOn;
+        if (k >= 0) show = show && (k == s.typeA || k == s.typeB);
+        if (id == "fxBal") show = show && ! s.series;
+        r->setVisible (show);
+    }
+    resized();
     repaint();
 }
 
@@ -641,30 +780,45 @@ void SlowSippinEditor::resized()
     }
     {
         auto f = rr;
-        const int padSize = juce::jmax (160, juce::jmin (f.getHeight() - 100, (int) (f.getWidth() * 0.47f)));
+        const int padSize = juce::jmax (160, juce::jmin (f.getHeight() - 196, (int) (f.getWidth() * 0.47f)));
         auto col = f.removeFromLeft (padSize);
-        f.removeFromLeft (24);
+        f.removeFromLeft (26);
         xy.setBounds (col.removeFromTop (padSize));
-        col.removeFromTop (6);
-        xyLabels = col.removeFromTop (24);
-        auto xl = xyLabels;
-        xl.removeFromLeft (16);
-        xChips.setBounds (xl.removeFromLeft (xl.getWidth() / 2 - 12));
-        xl.removeFromLeft (28);
-        yChips.setBounds (xl);
         col.removeFromTop (8);
-        if (! fxRows.isEmpty()) fxRows[0]->setBounds (col.removeFromTop (juce::jmin (44, col.getHeight())));   // FX MIX (dry / wet)
-
-        static const char* names[] = { "CHORUS", "DUB ECHO", "FILTER", "SPECTRAL" };
-        static const int counts[] = { 2, 3, 3, 3 };
-        const int headH = 20, gap = 6;
-        const int rowH = juce::jmin (38, (f.getHeight() - 4 * (headH + gap)) / 11);
-        fxHeadings.clear();
-        int idx = 1;
-        for (int gI = 0; gI < 4; ++gI)
+        auto axisLine = [&] (juce::Rectangle<int>& label, juce::ComboBox& cb, ss::ChipStrip& chips)
         {
-            fxHeadings.add ({ names[gI], f.removeFromTop (headH) });
-            for (int k = 0; k < counts[gI] && idx < fxRows.size(); ++k) fxRows[idx++]->setBounds (f.removeFromTop (rowH));
+            auto ln = col.removeFromTop (28);
+            label = ln.removeFromLeft (34);
+            chips.setBounds (ln.removeFromRight (juce::jmin (100, ln.getWidth() / 3)));
+            ln.removeFromRight (6);
+            cb.setBounds (ln);
+            col.removeFromTop (4);
+        };
+        axisLine (xLabel, padXBox, xChips);
+        axisLine (yLabel, padYBox, yChips);
+        col.removeFromTop (4);
+        const auto s = proc.currentFxSetup();
+        if (auto* r = fxRow ("fxMix")) r->setBounds (col.removeFromTop (40));
+        {
+            auto ln = col.removeFromTop (38).withTrimmedTop (6);
+            routeLabel = ln.removeFromLeft (82);
+            seriesBtn.setBounds (ln.removeFromLeft ((ln.getWidth() - 8) / 2));
+            ln.removeFromLeft (8);
+            parallelBtn.setBounds (ln);
+        }
+        if (auto* r = fxRow ("fxBal")) r->setBounds (col.removeFromTop (40).withTrimmedTop (2));
+
+        // slots: heading with the effect menu, then that effect's controls
+        const int headH = 30, gap = 18;
+        const int rowH = juce::jmin (42, (f.getHeight() - 2 * headH - gap - 8) / 6);
+        for (int slot = 0; slot < 2; ++slot)
+        {
+            auto head = f.removeFromTop (headH);
+            (slot == 0 ? slotAHead : slotBHead) = head.removeFromLeft (70);
+            (slot == 0 ? slotA : slotB).setBounds (head.removeFromLeft (juce::jmin (190, head.getWidth())).reduced (0, 1));
+            f.removeFromTop (4);
+            for (int t : ss::fxTypeTargets (slot == 0 ? s.typeA : s.typeB))
+                if (auto* r = fxRow (ss::targetParamId (t))) r->setBounds (f.removeFromTop (rowH));
             f.removeFromTop (gap);
         }
     }
@@ -752,18 +906,18 @@ void SlowSippinEditor::paint (juce::Graphics& g)
     }
     if (tab == 1)
     {
-        g.setFont (Fonts::sans (11.5f, Fonts::Bold, 0.2f));
-        for (auto& hd : fxHeadings)
-        {
-            g.setColour (Colours::ink);
-            g.drawText (hd.first, hd.second, juce::Justification::bottomLeft);
-            g.setColour (Colours::line);
-            g.fillRect (hd.second.getX(), hd.second.getBottom(), hd.second.getWidth(), 1);
-        }
-        g.setColour (Colours::muted);
-        g.setFont (Fonts::sans (10.5f, Fonts::SemiBold, 0.18f));
-        g.drawText ("X", xyLabels.withWidth (14), juce::Justification::centredLeft);
-        g.drawText ("Y", xChips.getRight() + 10, xyLabels.getY(), 14, xyLabels.getHeight(), juce::Justification::centredLeft);
+        g.setColour (Colours::ink);
+        g.setFont (Fonts::sans (12.0f, Fonts::Bold, 0.2f));
+        g.drawText ("SLOT A", slotAHead, juce::Justification::centredLeft);
+        g.drawText ("SLOT B", slotBHead, juce::Justification::centredLeft);
+        g.setColour (Colours::line);
+        for (auto* cb : { &slotA, &slotB })
+            g.fillRect (slotAHead.getX(), cb->getBottom() + 3, right.getRight() - 36 - slotAHead.getX(), 1);
+        g.setColour (Colours::ink);
+        g.setFont (Fonts::sans (11.0f, Fonts::Bold, 0.15f));
+        g.drawText (U8 ("X →"), xLabel, juce::Justification::centredLeft);
+        g.drawText (U8 ("Y →"), yLabel, juce::Justification::centredLeft);
+        g.drawText ("ROUTING", routeLabel, juce::Justification::centredLeft);
     }
 
     // modulation strip
@@ -847,7 +1001,7 @@ void SlowSippinEditor::timerCallback()
     source.repaint();
     xChips.sync();
     yChips.sync();
-    if (tab == 1) xy.repaint();
+    if (tab == 1) { xy.repaint(); syncFxControls(); }
     {
         float v[ss::kNumLfos];
         proc.lfoValuesNow (v);
