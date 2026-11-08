@@ -5,6 +5,8 @@
 #include "Params.h"
 #include "VoiceEngine.h"
 #include "Offline.h"
+#include "Effects.h"
+#include "Modulation.h"
 
 class SlowSippinProcessor : public juce::AudioProcessor,
                             public juce::ChangeBroadcaster,
@@ -61,10 +63,23 @@ public:
     ss::OfflineSettings offlineSettings() const;
     ss::Exporter exporter;
     int exportFormat = 0, exportBits = 24;     // remembered with the session
+    int uiTab = 0;                             // ENGINE / EFFECTS, remembered with the session
 
     /** Output scope: peak per ~10 ms, for the live display. */
     int readScope (float* dest, int max);
     float outputLevel() const noexcept { return outLevel.load(); }
+
+    // ---- modulation (UI reads routes / LFO values; edits routes on the message thread)
+    ss::ModSystem& getMod() noexcept { return mod; }
+    int64_t audioTime() const noexcept { return audioClock.load(); }
+    /** A target's current value with modulation (for drawing). */
+    float modulatedValue (int target) const noexcept
+    {
+        float lfo[ss::kNumLfos];
+        mod.lfoValuesAt (audioClock.load(), lfo);
+        return mod.apply (target, targetParam[(size_t) target]->load(), lfo);
+    }
+    void lfoValuesNow (float* out) const noexcept { mod.lfoValuesAt (audioClock.load(), out); }
 
     juce::AudioProcessorValueTreeState apvts;
     juce::AudioFormatManager formats;
@@ -76,6 +91,15 @@ private:
 
     std::map<juce::String, std::atomic<float>*> params;
     ss::EngineShared shared;
+    ss::ModSystem mod;
+    ss::FxChain fx;
+    int64_t clock = 0;
+    std::atomic<int64_t> audioClock { 0 };
+    std::array<std::atomic<float>*, ss::kNumTargets> targetParam {};
+    std::atomic<float>* lfoRateParam[ss::kNumLfos] {};
+    std::atomic<float>* lfoShapeParam[ss::kNumLfos] {};
+    static constexpr int kModChunk = 64;
+    std::vector<float> chunkWet, chunkGain;
     ss::VoiceEngine engine;
     ss::Analyzer analyzer;
 

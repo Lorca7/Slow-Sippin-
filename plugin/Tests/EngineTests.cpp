@@ -1,5 +1,6 @@
 // Engine tests: g++ -O2 -std=c++17 Tests/EngineTests.cpp Source/StretchEngine.cpp -o engine-tests
 #include "../Source/StretchEngine.h"
+#include "../Source/Effects.h"
 #include <cstdio>
 #include <chrono>
 #include <cstdlib>
@@ -142,6 +143,75 @@ int main()
         run (tone, sr, sr, st, 30);
         const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
         std::printf ("CPU: 30 s stereo, scatter %.1f weave %d → %.2f s  (%.1f%% of one core)\n", c.scatter, c.weave, secs, 100 * secs / 30);
+    }
+
+    // ------------------------------------------------------------ effects
+    {
+        const double fs = 48000;
+        const int n = (int) (3 * fs);
+        auto mk = [&] (double f, float amp) { auto v = sine (f, 3, fs, amp); return v; };
+        auto runFx = [&] (FxParams p, const std::vector<float>& inL, std::vector<float>& outL, std::vector<float>& outR)
+        {
+            FxChain fx; fx.prepare (fs, 512);
+            outL = inL; outR = inL;
+            for (int o = 0; o < n; o += 512) fx.process (outL.data() + o, outR.data() + o, std::min (512, n - o), p);
+        };
+        std::vector<float> L, R;
+        const auto tone = mk (440, 0.5f);
+
+        FxParams p; p.mix = 0;
+        runFx (p, tone, L, R);
+        double diff = 0; for (int i = 0; i < n; ++i) diff = std::max (diff, (double) std::abs (L[(size_t) i] - tone[(size_t) i]));
+        std::printf ("fx mix 0: max difference from dry %.1e\n", diff);
+        CHECK (diff == 0, "fx mix 0 must be bit-exact dry");
+
+        // filter corner (x=0,y=0), LP at 300 Hz: 4 kHz is cut, 100 Hz passes
+        p = FxParams(); p.mix = 1; p.x = 0; p.y = 0; p.cutHz = 300; p.res = 0; p.type = 0;
+        runFx (p, mk (4000, 0.5f), L, R);
+        const double hi = rms (L, (size_t) fs, (size_t) (2 * fs));
+        runFx (p, mk (100, 0.5f), L, R);
+        const double lo = rms (L, (size_t) fs, (size_t) (2 * fs));
+        std::printf ("filter LP 300 Hz: 100 Hz rms %.3f, 4 kHz rms %.4f\n", lo, hi);
+        CHECK (lo > 0.3 && hi < 0.01, "low-pass filter");
+        p.type = 1;   // high-pass
+        runFx (p, mk (100, 0.5f), L, R);
+        const double hpLo = rms (L, (size_t) fs, (size_t) (2 * fs));
+        std::printf ("filter HP 300 Hz: 100 Hz rms %.3f\n", hpLo);
+        CHECK (hpLo < 0.08, "high-pass filter");
+
+        // echo corner (x=1,y=1): a click comes back after TIME
+        p = FxParams(); p.mix = 1; p.x = 1; p.y = 1; p.echoTimeMs = 250; p.echoFb = 0.5f; p.echoTone = 1;
+        std::vector<float> click ((size_t) n, 0.0f); click[1000] = 1.0f;
+        runFx (p, click, L, R);
+        int first = -1; for (int i = 1001; i < n; ++i) if (std::abs (L[(size_t) i]) > 0.05f) { first = i; break; }
+        int second = -1; for (int i = first + 2000; first > 0 && i < n; ++i) if (std::abs (L[(size_t) i]) > 0.02f) { second = i; break; }
+        std::printf ("dub echo 250 ms: repeats at +%.0f ms and +%.0f ms\n", (first - 1000) / 48.0, (second - 1000) / 48.0);
+        CHECK (std::abs ((first - 1000) / 48.0 - 250) < 6 && std::abs ((second - 1000) / 48.0 - 500) < 12, "echo timing and feedback");
+
+        // chorus corner (x=0,y=1): same pitch, modulated
+        p = FxParams(); p.mix = 1; p.x = 0; p.y = 1; p.chDepth = 1;
+        runFx (p, tone, L, R);
+        std::printf ("chorus: rms %.3f, freq %.1f Hz\n", rms (L, (size_t) fs, (size_t) (2 * fs)), zcFreq (L, (size_t) fs, (size_t) (2 * fs), fs));
+        CHECK (std::abs (zcFreq (L, (size_t) fs, (size_t) (2 * fs), fs) - 440) < 8, "chorus keeps pitch");
+
+        // spectral corner (x=1,y=0): +12 st shift doubles the frequency
+        p = FxParams(); p.mix = 1; p.x = 1; p.y = 0; p.blur = 0; p.shiftSt = 12;
+        runFx (p, tone, L, R);
+        const double sf = zcFreq (L, (size_t) fs, (size_t) (2 * fs), fs);
+        std::printf ("spectral +12 st: %.1f Hz (expect 880), rms %.3f\n", sf, rms (L, (size_t) fs, (size_t) (2 * fs)));
+        CHECK (std::abs (sf - 880) < 10, "spectral shift");
+        p.shiftSt = 0; p.blur = 0;
+        runFx (p, tone, L, R);
+        std::printf ("spectral identity: rms %.3f (in 0.354)\n", rms (L, (size_t) fs, (size_t) (2 * fs)));
+        CHECK (std::abs (rms (L, (size_t) fs, (size_t) (2 * fs)) - 0.354) < 0.03, "spectral identity level");
+
+        // centre of the pad, everything at once with extreme settings: stays finite and bounded
+        p = FxParams(); p.mix = 1; p.x = 0.5f; p.y = 0.5f; p.echoFb = 1.1f; p.res = 1; p.blur = 1; p.thin = 1; p.shiftSt = -24;
+        runFx (p, tone, L, R);
+        float pk = 0; bool fin = true;
+        for (int i = 0; i < n; ++i) { fin = fin && std::isfinite (L[(size_t) i]) && std::isfinite (R[(size_t) i]); pk = std::max (pk, std::abs (L[(size_t) i])); }
+        std::printf ("all four at once, extreme settings: finite %d, peak %.2f\n", (int) fin, pk);
+        CHECK (fin && pk < 20, "extreme settings stay bounded");
     }
 
     std::printf (failures ? "\n%d FAILURE(S)\n" : "\nall engine tests passed\n", failures);

@@ -14,6 +14,7 @@
 
 #include "StretchEngine.h"
 #include "SampleData.h"
+#include "Modulation.h"
 #include <atomic>
 
 namespace ss
@@ -26,6 +27,8 @@ struct EngineShared
     std::atomic<int> weave { 4 };
     std::atomic<bool> loop { false }, reverse { false }, monoStereo { true };
     std::atomic<int> regionA { 0 }, regionB { 0 };   // samples; b <= a means "whole sample"
+    std::atomic<float> window { 0 };                 // % of the sample length the region is moved by
+    const ModSystem* mod = nullptr;
 
     StreamSettings snapshot (float noteSemis) const noexcept
     {
@@ -41,23 +44,30 @@ struct EngineShared
         return s;
     }
 
-    /** Region of `d` as a SourceView (clamped to the data). */
-    SourceView view (const SampleData& d) const noexcept
+    /** Engine settings at output sample time t, with LFO modulation applied. */
+    StreamSettings snapshotAt (float noteSemis, int64_t t, float& windowOut) const noexcept
     {
-        int a = regionA.load (std::memory_order_relaxed), b = regionB.load (std::memory_order_relaxed);
-        a = juce::jlimit (0, d.length, a);
-        b = juce::jlimit (0, d.length, b);
-        if (b - a < 16) { a = 0; b = d.length; }
-        SourceView v;
-        v.numChannels = d.numChannels;
-        v.len = b - a;
-        v.sampleRate = d.sampleRate;
-        for (int c = 0; c < d.numChannels; ++c)
+        StreamSettings s = snapshot (noteSemis);
+        float w = window.load (std::memory_order_relaxed);
+        if (mod != nullptr)
         {
-            v.fwd[c] = d.fwd.getReadPointer (c) + a;
-            v.rev[c] = d.rev.getReadPointer (c) + (d.length - b);
+            float lfo[kNumLfos];
+            mod->lfoValuesAt (t, lfo);
+            s.stretch = mod->apply (tStretch, (float) s.stretch, lfo);
+            s.pitchSemis = mod->apply (tPitch, pitch.load (std::memory_order_relaxed), lfo) + noteSemis;
+            s.weave = (int) mod->apply (tWeave, (float) s.weave, lfo);
+            s.scatter = mod->apply (tScatter, (float) s.scatter * 100.0f, lfo) / 100.0f;
+            s.driftMs = mod->apply (tDrift, (float) s.driftMs, lfo);
+            w = mod->apply (tWindow, w, lfo);
         }
-        return v;
+        windowOut = w;
+        return s;
+    }
+
+    /** Region of `d` as a SourceView, moved by `windowPct` % of the sample. */
+    SourceView view (const SampleData& d, float windowPct = 0) const noexcept
+    {
+        return regionView (d, regionA.load (std::memory_order_relaxed), regionB.load (std::memory_order_relaxed), windowPct);
     }
 };
 
@@ -79,7 +89,7 @@ public:
     void shutdown();
 
     // ---- audio thread
-    void noteOn (int note, float velocity, bool transport, double startFrac, uint32_t seed) noexcept;
+    void noteOn (int note, float velocity, bool transport, double startFrac, uint32_t seed, int64_t startTime) noexcept;
     void noteOff (int note) noexcept;
     void stopTransport() noexcept;              // quick fade
     void jumpTransport (double frac) noexcept;
@@ -113,6 +123,7 @@ private:
         std::atomic<int> cmd { 0 };                 // 1 start, 2 jump, 3 stop
         std::atomic<double> cmdFrac { 0 };
         std::atomic<uint32_t> cmdSeed { 1 };
+        std::atomic<int64_t> cmdTime { 0 };
         std::atomic<float> noteSemis { 0 };
         std::atomic<bool> ended { false };
 
@@ -125,6 +136,7 @@ private:
         SampleData::Ptr data;
         uint32_t wgen = 0;
         bool streaming = false;
+        int64_t t0 = 0, rendered = 0;               // output time of the next sample this voice renders
 
         // UI
         std::atomic<bool> sounding { false };

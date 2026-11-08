@@ -8,6 +8,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../Source/Offline.h"
+#include "../Source/Params.h"
 
 static int failures = 0;
 static void check (bool ok, const juce::String& what)
@@ -169,8 +170,10 @@ int main (int argc, char** argv)
 
     std::printf ("parameters are independent:\n");
     {
-        const juce::StringArray ours { "STRETCH", "PITCH", "WEAVE", "SCATTER", "DRIFT", "REVERB", "SIZE", "GAIN", "ATTACK", "RELEASE",
-                                       "NORMALIZE", juce::String::fromUTF8 ("MONO → STEREO"), "REVERSE", "LOOP", "KEY TRACK" };
+        juce::StringArray ours;
+        for (const auto& c : ss::controlSpecs()) ours.add (ss::hostName (c));
+        for (const auto& t : ss::toggleSpecs()) ours.add (juce::String::fromUTF8 (t.label));
+        for (int i = 0; i < ss::kNumLfos; ++i) ours.add ("LFO " + juce::String (i + 1) + " SHAPE");
         juce::Array<juce::AudioProcessorParameter*> ps;
         for (auto* prm : inst->getParameters()) if (ours.contains (prm->getName (64))) ps.add (prm);
         check (ps.size() == ours.size(), "found all " + juce::String (ours.size()) + " parameters (" + juce::String (ps.size()) + ")");
@@ -196,6 +199,27 @@ int main (int argc, char** argv)
         render (*inst, 0.1);
     }
 
+    std::printf ("effects in the plugin (FX MIX 100, all four corners):\n");
+    {
+        juce::MidiBuffer bOn; bOn.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 0);
+        const double dryRms = render (*inst, 2.0, bOn).rms;
+        render (*inst, 0.3, allOff);
+        std::printf ("    dry (FX MIX 0): rms %.3f\n", dryRms);
+        setParam (*inst, "FX MIX", 100.0f);
+        for (auto xy : { std::pair<float, float> { 0, 100 }, { 100, 100 }, { 0, 0 }, { 100, 0 }, { 50, 50 } })
+        {
+            setParam (*inst, "FX X", xy.first);
+            setParam (*inst, "FX Y", xy.second);
+            juce::MidiBuffer nOn; nOn.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 0);
+            const auto st = render (*inst, 2.0, nOn);
+            render (*inst, 0.3, allOff);
+            check (st.finite && st.rms > 0.01 && st.peak <= 1.0f, "pad at " + juce::String (xy.first, 0) + "," + juce::String (xy.second, 0)
+                   + ": rms " + juce::String (st.rms, 3) + " (" + juce::String (juce::Decibels::gainToDecibels (st.rms / dryRms), 1) + " dB vs dry), peak " + juce::String (st.peak, 3));
+        }
+        setParam (*inst, "FX MIX", 0.0f);
+        render (*inst, 1.0);
+    }
+
     std::printf ("offline bounce (non-realtime):\n");
     inst->setNonRealtime (true);
     std::vector<float> w2;
@@ -211,6 +235,73 @@ int main (int argc, char** argv)
     inst->getStateInformation (saved);
     const auto txt = saved.toString();
     check (saved.getSize() > 100, "state saved (" + juce::String ((int) saved.getSize()) + " bytes)");
+
+    std::printf ("window scrub by an LFO:\n");
+    {
+        // two-tone sample: 3 s of 220 Hz, then 3 s of 880 Hz; the region covers only the 220 Hz part
+        const int sr = 48000, len = 6 * sr;
+        std::vector<float> tt ((size_t) len);
+        for (int i = 0; i < len; ++i) tt[(size_t) i] = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * (i < len / 2 ? 220.0 : 880.0) * i / sr);
+        const auto ttFile = outDir.getChildFile ("twotone.wav");
+        juce::String e;
+        ss::writeAudioFile (ttFile, 0, 24, { tt.data() }, (size_t) len, sr, 1.0f, e);
+
+        auto loadWith = [&] (bool withRoute)
+        {
+            juce::XmlElement prm ("PARAMS");
+            auto* ses = prm.createNewChildElement ("SESSION");
+            ses->setAttribute ("sample", ttFile.getFullPathName());
+            ses->setAttribute ("regionA", 0);
+            ses->setAttribute ("regionB", len / 4);
+            if (withRoute)
+            {
+                auto* m = ses->createNewChildElement ("MOD");
+                auto* r = m->createNewChildElement ("ROUTE");
+                r->setAttribute ("lfo", 0);
+                r->setAttribute ("target", "window");
+                r->setAttribute ("depth", 0.5);   // what dropping an LFO on the waveform gives
+            }
+            juce::MemoryBlock b;
+            juce::AudioProcessor::copyXmlToBinary (prm, b);
+            juce::XmlElement vs ("VST3PluginState");
+            vs.createNewChildElement ("IComponent")->addTextElement (b.toBase64Encoding());
+            juce::MemoryBlock o;
+            juce::AudioProcessor::copyXmlToBinary (vs, o);
+            inst->setStateInformation (o.getData(), (int) o.getSize());
+            pump (1200);
+            setParam (*inst, "STRETCH", 2.0f);
+            setParam (*inst, "SCATTER", 0.0f);
+            setParam (*inst, "LFO 1", 0.25f);
+            setParam (*inst, "NORMALIZE", 0.0f);
+            pump (300);
+        };
+        auto segments = [&] (int& lo, int& hi)
+        {
+            std::vector<float> w;
+            juce::MidiBuffer nOn; nOn.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 0);
+            render (*inst, 10.0, nOn, &w);
+            render (*inst, 0.3, allOff);
+            lo = hi = 0;
+            const size_t seg = 12000;
+            for (size_t s0 = 4800; s0 + seg <= w.size(); s0 += seg)
+            {
+                int z = 0;
+                for (size_t i = s0 + 1; i < s0 + seg; ++i) if (w[i - 1] < 0 && w[i] >= 0) ++z;
+                const double f = z / (seg / 48000.0);
+                if (f > 150 && f < 330) ++lo;
+                if (f > 600 && f < 1100) ++hi;
+            }
+        };
+        int lo, hi;
+        loadWith (false);
+        segments (lo, hi);
+        std::printf ("    no LFO:   %d segments at 220 Hz, %d at 880 Hz\n", lo, hi);
+        check (hi == 0 && lo > 10, "without modulation the region stays on the 220 Hz part");
+        loadWith (true);
+        segments (lo, hi);
+        std::printf ("    LFO 1 on WINDOW: %d segments at 220 Hz, %d at 880 Hz\n", lo, hi);
+        check (hi >= 3 && lo >= 3, "the LFO moves the window across the sample (both halves heard)");
+    }
 
     std::printf ("editor:\n");
     if (auto* ed = inst->createEditorIfNeeded())
@@ -258,6 +349,34 @@ int main (int argc, char** argv)
             while (ex.isBusy()) juce::Thread::sleep (20);
             check (ex.state() == ss::Exporter::Done && f.getSize() > 1000, juce::String (name) + ": " + ex.message());
         }
+    }
+
+    std::printf ("export with effects + LFO:\n");
+    if (data != nullptr)
+    {
+        ss::ModSystem mod;
+        ss::OfflineSettings os;
+        os.data = data;
+        for (int t = 0; t < ss::kNumTargets; ++t) os.base[(size_t) t] = ss::findSpec (ss::targetParamId (t))->def;
+        os.base[ss::tStretch] = 4;
+        os.base[ss::tFxMix] = 100; os.base[ss::tFxX] = 100; os.base[ss::tFxY] = 100;   // dub echo
+        os.base[ss::tEchoFb] = 70;
+        os.stream.stretch = 4; os.stream.scatter = 1; os.stream.weave = 4;
+        os.regionA = 0; os.regionB = data->length / 3;
+        for (int i = 0; i < ss::kNumLfos; ++i) { os.lfoRate[i] = 0.5f; os.lfoShape[i] = ss::Sine; }
+        mod.addRoute (0, ss::tFltCut, 0.5f);
+        mod.addRoute (1, ss::tWindow, 0.6f);
+        mod.addRoute (2, ss::tFxX, -0.4f);
+        os.routes = mod.snapshotRoutes();
+        os.mod = &mod;
+        ss::Exporter ex;
+        const auto f = outDir.getChildFile ("fx_lfo.wav");
+        ex.start (os, f, 0, 24);
+        while (ex.isBusy()) juce::Thread::sleep (20);
+        const double expect = data->length / 3.0 / data->sampleRate * 4.0;
+        const double got = (double) (f.getSize() - 44) / (2 * 3) / data->sampleRate;
+        check (ex.state() == ss::Exporter::Done, ex.message());
+        check (got > expect + 0.5, "file " + juce::String (got, 2) + " s > one-shot " + juce::String (expect, 2) + " s (echo tail kept)");
     }
 
     // --- optional: very long renders (hour-long, and > 4 GB as RF64)

@@ -46,6 +46,7 @@ juce_add_plugin(SlowSippin
 
 target_sources(SlowSippin PRIVATE
     Source/StretchEngine.cpp
+    Source/Effects.cpp
     Source/VoiceEngine.cpp
     Source/Offline.cpp
     Source/PluginProcessor.cpp
@@ -78,13 +79,13 @@ target_link_libraries(SlowSippin
         juce::juce_recommended_warning_flags)
 
 # Engine unit tests (no JUCE needed)
-add_executable(EngineTests Tests/EngineTests.cpp Source/StretchEngine.cpp)
+add_executable(EngineTests Tests/EngineTests.cpp Source/StretchEngine.cpp Source/Effects.cpp)
 
 # Headless host test: loads the built VST3 like a DAW (cmake -DSS_BUILD_HOST_TEST=ON)
 option(SS_BUILD_HOST_TEST "Build the VST3 host test" OFF)
 if(SS_BUILD_HOST_TEST)
     juce_add_console_app(HostTest PRODUCT_NAME "HostTest")
-    target_sources(HostTest PRIVATE Tests/HostTest.cpp Source/Offline.cpp Source/StretchEngine.cpp)
+    target_sources(HostTest PRIVATE Tests/HostTest.cpp Source/Offline.cpp Source/StretchEngine.cpp Source/Effects.cpp)
     target_compile_definitions(HostTest PRIVATE
         JUCE_PLUGINHOST_VST3=1 JUCE_MODAL_LOOPS_PERMITTED=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_USE_MP3AUDIOFORMAT=1)
     target_link_libraries(HostTest PRIVATE juce::juce_audio_processors juce::juce_audio_formats juce::juce_gui_basics

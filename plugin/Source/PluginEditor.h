@@ -2,16 +2,24 @@
 
 #include "PluginProcessor.h"
 #include "Look.h"
+#include "ModUI.h"
 
 namespace ss
 {
 
-/** Source waveform: drag = select, click = start point, double-click = clear. */
-class SourceWave : public juce::Component
+/** Source waveform: drag = select, click = start point, double-click = clear.
+    Drop an LFO here to move the region window (scrub). */
+class SourceWave : public juce::Component, public juce::DragAndDropTarget
 {
 public:
-    explicit SourceWave (SlowSippinProcessor& p) : proc (p) {}
+    explicit SourceWave (SlowSippinProcessor& p) : proc (p), chips (p, tWindow, true) { addAndMakeVisible (chips); }
     void paint (juce::Graphics&) override;
+    void resized() override { chips.setBounds (getWidth() / 2 - 120, 4, 240, 22); }
+    void syncChips() { chips.sync(); }
+    bool isInterestedInDragSource (const SourceDetails& d) override { return lfoFromDescription (d.description) >= 0; }
+    void itemDragEnter (const SourceDetails&) override { dropHover = true; repaint(); }
+    void itemDragExit (const SourceDetails&) override { dropHover = false; repaint(); }
+    void itemDropped (const SourceDetails& d) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
@@ -21,8 +29,9 @@ public:
 private:
     int sampleAt (float x) const;
     SlowSippinProcessor& proc;
+    ChipStrip chips;
     int dragFrom = -1;
-    bool dragged = false;
+    bool dragged = false, dropHover = false;
 };
 
 /** The output timeline: drawn as it plays; click sets the start point. */
@@ -58,32 +67,45 @@ public:
     }
 };
 
-/** LABEL · big value · slider · number box, bound to one parameter. */
-class ControlRow : public juce::Component
+/** LABEL · big value · slider · number box, bound to one parameter.
+    Accepts LFOs by drag and drop; shows their chips and the live modulated value. */
+class ControlRow : public juce::Component, public juce::DragAndDropTarget
 {
 public:
-    ControlRow (const ControlSpec& s, juce::RangedAudioParameter& p);
+    ControlRow (SlowSippinProcessor& proc, const ControlSpec& s, juce::RangedAudioParameter& p, bool compact = false);
     void refresh();
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
     void resized() override;
+    const ControlSpec& getSpec() const { return spec; }
+
+    bool isInterestedInDragSource (const SourceDetails& d) override { return target >= 0 && lfoFromDescription (d.description) >= 0; }
+    void itemDragEnter (const SourceDetails&) override { dropHover = true; repaint(); }
+    void itemDragExit (const SourceDetails&) override { dropHover = false; repaint(); }
+    void itemDropped (const SourceDetails& d) override;
 
 private:
     void apply (double v);
     double current() const { return param.convertFrom0to1 (param.getValue()); }
     int decimalsFor (double v) const;
 
+    SlowSippinProcessor& proc;
     ControlSpec spec;
     juce::RangedAudioParameter& param;
+    int target;
+    bool compact;
     juce::Slider slider;
     NumberBox box;
+    std::unique_ptr<ChipStrip> chips;
     double shown = std::numeric_limits<double>::quiet_NaN();
-    bool dragging = false, updating = false, edited = false;
+    bool dragging = false, updating = false, edited = false, dropHover = false;
 };
 
 } // namespace ss
 
 class SlowSippinEditor : public juce::AudioProcessorEditor,
                          public juce::FileDragAndDropTarget,
+                         public juce::DragAndDropContainer,
                          private juce::Timer,
                          private juce::ChangeListener
 {
@@ -106,6 +128,7 @@ private:
     void openSample();
     void startExport();
     void setStatus (const juce::String& s, bool error = false, int holdMs = 5000);
+    void showTab (int t);
     juce::String exportFileName (const juce::String& ext) const;
 
     SlowSippinProcessor& proc;
@@ -114,13 +137,20 @@ private:
     juce::ComboBox fmtBox, bitsBox;
     ss::SourceWave source;
     ss::OutputView output;
-    juce::OwnedArray<ss::ControlRow> rows;
+    juce::OwnedArray<ss::ControlRow> rows;          // ENGINE tab
+    juce::OwnedArray<ss::ControlRow> fxRows;        // FX tab (FX MIX first)
+    juce::TextButton engineTab { "ENGINE" }, fxTab { "EFFECTS" };
+    int tab = 0;
+    ss::XYPad xy;
+    ss::ChipStrip xChips, yChips;
+    juce::OwnedArray<ss::LfoTile> lfos;
     juce::OwnedArray<juce::ToggleButton> toggles;
     juce::OwnedArray<juce::ButtonParameterAttachment> toggleAtts;
     std::unique_ptr<juce::FileChooser> chooser;
     juce::TooltipWindow tooltips { this, 600 };
 
-    juce::Rectangle<int> header, footer, left, right, legendArea, statsArea, srcHint, outHint;
+    juce::Rectangle<int> header, footer, left, right, legendArea, statsArea, srcHint, outHint, lfoStrip, xyLabels;
+    juce::Array<std::pair<juce::String, juce::Rectangle<int>>> fxHeadings;
     juce::String status, statusShown;
     bool statusError = false;
     juce::uint32 statusUntil = 0;

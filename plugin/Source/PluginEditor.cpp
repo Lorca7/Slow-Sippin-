@@ -95,12 +95,25 @@ void SourceWave::paint (juce::Graphics& g)
         const int W = getWidth();
         const float mid = r.getCentreY(), sc = r.getHeight() * 0.40f / juce::jmax (1e-6f, d->peak);
         const bool hasRegion = proc.hasRegion();
-        const float xa = hasRegion ? (float) proc.regionA() / d->length * W : 0.0f;
-        const float xb = hasRegion ? (float) proc.regionB() / d->length * W : (float) W;
+        // where the window is right now (WINDOW control + any LFO on it)
+        const float wnd = proc.modulatedValue (tWindow);
+        const auto mv = regionView (*d, proc.regionA(), proc.regionB(), wnd);
+        const int ma = (int) (mv.fwd[0] - d->fwd.getReadPointer (0));
+        const bool moved = hasRegion && ma != proc.regionA();
+        const float xa = hasRegion ? (float) ma / d->length * W : 0.0f;
+        const float xb = hasRegion ? (float) (ma + mv.len) / d->length * W : (float) W;
         if (hasRegion)
         {
             g.setColour (Colours::red.withAlpha (0.10f));
             g.fillRect (xa, 0.0f, xb - xa, r.getHeight());
+        }
+        if (moved)   // the drawn selection, where the window returns to
+        {
+            const float ha = (float) proc.regionA() / d->length * W, hb = (float) proc.regionB() / d->length * W;
+            g.setColour (Colours::red.withAlpha (0.45f));
+            const float dash[] = { 4.0f, 4.0f };
+            g.drawDashedLine ({ ha, 2.0f, ha, r.getHeight() - 2.0f }, dash, 2, 1.0f);
+            g.drawDashedLine ({ hb, 2.0f, hb, r.getHeight() - 2.0f }, dash, 2, 1.0f);
         }
         const int K = SampleData::kOverview;
         for (int x = 0; x < W; ++x)
@@ -117,14 +130,20 @@ void SourceWave::paint (juce::Graphics& g)
         {
             g.setColour (Colours::red);
             g.fillRect (xa - 0.75f, 0.0f, 1.5f, r.getHeight());
-            if (proc.regionB() < d->length) g.fillRect (xb - 0.75f, 0.0f, 1.5f, r.getHeight());
+            if (ma + mv.len < d->length) g.fillRect (xb - 0.75f, 0.0f, 1.5f, r.getHeight());
+        }
+        else if (proc.getMod().hasRoutesFor (tWindow) || std::abs (wnd) > 0.01f)
+        {
+            g.setColour (Colours::red);
+            g.setFont (Fonts::mono (11.5f));
+            g.drawText ("select a region first - the WINDOW moves that selection across the sample",
+                        r.withTrimmedTop (r.getHeight() - 30), juce::Justification::centred);
         }
 
         // where the voices are reading
         float pos[VoiceEngine::kMaxVoices];
         const int nv = proc.voicePositions (pos, VoiceEngine::kMaxVoices);
-        const float rs = hasRegion ? (float) proc.regionA() / d->length : 0.0f;
-        const float re = hasRegion ? (float) proc.regionB() / d->length : 1.0f;
+        const float rs = xa / W, re = xb / W;
         g.setColour (Colours::ink.withAlpha (0.75f));
         for (int i = 0; i < nv; ++i)
             g.fillRect ((rs + pos[i] * (re - rs)) * W - 0.75f, 0.0f, 1.5f, r.getHeight());
@@ -142,8 +161,22 @@ void SourceWave::paint (juce::Graphics& g)
         drawTag (g, tag, r, true);
     }
     drawTag (g, "SOURCE", r, false);
-    g.setColour (Colours::line);
-    g.drawRect (r, 2.0f);
+    g.setColour (dropHover ? Colours::red : Colours::line);
+    g.drawRect (r, dropHover ? 3.0f : 2.0f);
+    if (dropHover)
+    {
+        g.setFont (Fonts::sans (12.0f, Fonts::Bold, 0.16f));
+        g.drawText ("DROP TO MOVE THE WINDOW WITH THIS LFO", r.withTrimmedBottom (r.getHeight() * 0.5f), juce::Justification::centredBottom);
+    }
+}
+
+void SourceWave::itemDropped (const SourceDetails& det)
+{
+    dropHover = false;
+    const int lfo = lfoFromDescription (det.description);
+    if (lfo >= 0) proc.getMod().addRoute (lfo, tWindow, 0.5f);   // full sweep across the sample
+    chips.sync();
+    repaint();
 }
 
 void SourceWave::mouseDown (const juce::MouseEvent& e)
@@ -276,7 +309,8 @@ void OutputView::mouseDown (const juce::MouseEvent& e)
 
 // ============================================================ ControlRow
 
-ControlRow::ControlRow (const ControlSpec& s, juce::RangedAudioParameter& p) : spec (s), param (p)
+ControlRow::ControlRow (SlowSippinProcessor& pr, const ControlSpec& s, juce::RangedAudioParameter& p, bool isCompact)
+    : proc (pr), spec (s), param (p), target (s.modulatable ? targetForParam (s.id) : -1), compact (isCompact)
 {
     slider.setSliderStyle (juce::Slider::LinearHorizontal);
     slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -293,11 +327,12 @@ ControlRow::ControlRow (const ControlSpec& s, juce::RangedAudioParameter& p) : s
         apply (v);
         if (! dragging) param.endChangeGesture();
     };
-    slider.setTooltip (juce::String (spec.label).toLowerCase() + ": drag, or double-click to reset");
+    slider.setTooltip (juce::String::fromUTF8 (spec.label).toLowerCase() + ": drag, double-click to reset"
+                       + (target >= 0 ? juce::String (" - drop an LFO here to modulate it") : juce::String()));
     addAndMakeVisible (slider);
 
     box.setJustification (juce::Justification::centred);
-    box.setFont (Fonts::mono (14.0f));
+    box.setFont (Fonts::mono (compact ? 12.5f : 14.0f));
     box.setSelectAllWhenFocused (true);
     box.setInputRestrictions (16, "0123456789.,-+eE");
     // only what was actually typed is applied - focus changes never write a stale value back
@@ -330,6 +365,12 @@ ControlRow::ControlRow (const ControlSpec& s, juce::RangedAudioParameter& p) : s
         box.selectAll();
     };
     addAndMakeVisible (box);
+
+    if (target >= 0)
+    {
+        chips = std::make_unique<ChipStrip> (proc, target);
+        addAndMakeVisible (*chips);
+    }
     refresh();
 }
 
@@ -347,6 +388,9 @@ void ControlRow::apply (double v)
 
 void ControlRow::refresh()
 {
+    if (chips != nullptr && chips->sync()) resized();
+    const bool modulated = target >= 0 && proc.getMod().hasRoutesFor (target);
+    if (modulated) repaint();
     const double v = current();
     if (v == shown) return;
     shown = v;
@@ -356,23 +400,42 @@ void ControlRow::refresh()
     repaint();
 }
 
+void ControlRow::itemDropped (const SourceDetails& d)
+{
+    dropHover = false;
+    const int lfo = lfoFromDescription (d.description);
+    if (lfo >= 0 && target >= 0) proc.getMod().addRoute (lfo, target, 0.5f);
+    refresh();
+    repaint();
+}
+
 void ControlRow::paint (juce::Graphics& g)
 {
     auto r = getLocalBounds();
+    if (dropHover)
+    {
+        g.setColour (Colours::red.withAlpha (0.12f));
+        g.fillRect (r);
+    }
     g.setColour (Colours::faint);
     g.fillRect (0, getHeight() - 1, getWidth(), 1);
 
-    const int labelW = juce::jmin (122, getWidth() / 6);
+    const bool hasChips = chips != nullptr && chips->count() > 0;
+    const int labelW = compact ? juce::jmin (118, (int) (getWidth() * 0.36f)) : juce::jmin (122, getWidth() / 6);
+    auto labelR = hasChips ? r.withWidth (labelW).withHeight (getHeight() / 2 + 2) : r.withWidth (labelW);
     g.setColour (Colours::ink);
-    auto lf = Fonts::sans (12.5f, Fonts::Bold, 0.15f);
+    auto lf = Fonts::sans (compact ? 11.0f : 12.5f, Fonts::Bold, 0.15f);
     g.setFont (lf);
-    g.drawText (spec.label, r.withWidth (labelW), juce::Justification::centredLeft);
+    const auto label = juce::String::fromUTF8 (spec.label);
+    g.drawText (label, labelR, hasChips ? juce::Justification::bottomLeft : juce::Justification::centredLeft);
     if (spec.engine)
     {
-        const float tw = juce::GlyphArrangement::getStringWidth (lf, spec.label);
+        const float tw = juce::GlyphArrangement::getStringWidth (lf, label);
         g.setColour (Colours::red);
-        g.fillEllipse (tw + 7.0f, getHeight() * 0.5f - 2.5f, 5.0f, 5.0f);
+        const float cy = hasChips ? labelR.getBottom() - 8.0f : getHeight() * 0.5f - 2.5f;
+        g.fillEllipse (tw + 7.0f, cy, 5.0f, 5.0f);
     }
+    if (compact) return;
 
     const juce::String num = juce::String (shown, decimalsFor (shown));
     auto big = Fonts::mono (juce::jlimit (18.0f, 27.0f, getHeight() * 0.56f), Fonts::Light, 0.03f);
@@ -386,23 +449,43 @@ void ControlRow::paint (juce::Graphics& g)
     g.drawText (spec.unit, vx + (int) nw + 4, 4, 30, getHeight(), juce::Justification::centredLeft);
 }
 
+void ControlRow::paintOverChildren (juce::Graphics& g)
+{
+    if (target < 0 || ! proc.getMod().hasRoutesFor (target)) return;
+    // live modulated value: a line from the base value to a ring at the current value
+    const double base = current();
+    const double v = proc.modulatedValue (target);
+    const float y = (float) slider.getBounds().getCentreY();
+    const float xb = (float) slider.getX() + (float) slider.getPositionOfValue (specToPos (spec, base));
+    const float xm = (float) slider.getX() + (float) slider.getPositionOfValue (specToPos (spec, v));
+    g.setColour (Colours::ink.withAlpha (0.55f));
+    g.fillRect (juce::jmin (xb, xm), y - 1.0f, std::abs (xm - xb), 2.0f);
+    g.setColour (Colours::ink);
+    g.drawEllipse (juce::Rectangle<float> (11.0f, 11.0f).withCentre ({ xm, y }), 2.0f);
+}
+
 void ControlRow::resized()
 {
     auto r = getLocalBounds();
-    const int labelW = juce::jmin (122, getWidth() / 6);
-    const int boxW = juce::jlimit (70, 112, getWidth() / 6);
-    box.setBounds (r.removeFromRight (boxW).reduced (0, juce::jmax (6, (getHeight() - 36) / 2)));
-    r.removeFromRight (18);
+    const int labelW = compact ? juce::jmin (118, (int) (getWidth() * 0.36f)) : juce::jmin (122, getWidth() / 6);
+    const int boxW = compact ? juce::jlimit (56, 84, getWidth() / 6) : juce::jlimit (70, 112, getWidth() / 6);
+    box.setBounds (r.removeFromRight (boxW).reduced (0, juce::jmax (compact ? 4 : 6, (getHeight() - (compact ? 28 : 36)) / 2)));
+    r.removeFromRight (compact ? 12 : 18);
+    if (chips != nullptr)
+        chips->setBounds (0, getHeight() / 2 + 1, labelW + (compact ? 0 : 110), getHeight() / 2 - 2);
     r.removeFromLeft (labelW + 8);
-    const int valueW = juce::jmax (100, r.getWidth() * 42 / 100);
-    r.removeFromLeft (valueW);
+    if (! compact)
+    {
+        const int valueW = juce::jmax (100, r.getWidth() * 42 / 100);
+        r.removeFromLeft (valueW);
+    }
     slider.setBounds (r.reduced (0, juce::jmax (4, (getHeight() - 30) / 2)));
 }
 
 // ============================================================== Editor
 
 SlowSippinEditor::SlowSippinEditor (SlowSippinProcessor& p)
-    : AudioProcessorEditor (&p), proc (p), source (p), output (p)
+    : AudioProcessorEditor (&p), proc (p), source (p), output (p), xy (p), xChips (p, ss::tFxX), yChips (p, ss::tFxY)
 {
     setLookAndFeel (&look);
     juce::LookAndFeel::setDefaultLookAndFeel (&look);
@@ -437,8 +520,27 @@ SlowSippinEditor::SlowSippinEditor (SlowSippinProcessor& p)
     addAndMakeVisible (output);
 
     for (const auto& c : controlSpecs())
-        if (auto* prm = proc.apvts.getParameter (c.id))
-            addAndMakeVisible (rows.add (new ControlRow (c, *prm)));
+    {
+        auto* prm = proc.apvts.getParameter (c.id);
+        if (prm == nullptr) continue;
+        if (c.group == ControlSpec::Engine || c.group == ControlSpec::Output)
+            addAndMakeVisible (rows.add (new ControlRow (proc, c, *prm)));
+        else if (c.group == ControlSpec::Fx)
+            addChildComponent (fxRows.add (new ControlRow (proc, c, *prm, true)));
+    }
+    addChildComponent (xy);
+    addChildComponent (xChips);
+    addChildComponent (yChips);
+    for (auto* t : { &engineTab, &fxTab })
+    {
+        t->setClickingTogglesState (false);
+        addAndMakeVisible (t);
+    }
+    engineTab.onClick = [this] { showTab (0); };
+    fxTab.onClick = [this] { showTab (1); };
+    engineTab.setTooltip ("Stretch engine, window, reverb, gain, envelope");
+    fxTab.setTooltip ("Chorus, dub echo, filter and spectral effects with the XY pad");
+    for (int i = 0; i < ss::kNumLfos; ++i) addAndMakeVisible (lfos.add (new ss::LfoTile (proc, i)));
 
     for (const auto& t : toggleSpecs())
     {
@@ -454,9 +556,25 @@ SlowSippinEditor::SlowSippinEditor (SlowSippinProcessor& p)
     proc.addChangeListener (this);
     setWantsKeyboardFocus (true);
     setResizable (true, true);
-    setResizeLimits (980, 720, 2600, 1700);
-    setSize (1320, 860);
+    setResizeLimits (1180, 880, 2600, 1800);
+    setSize (1360, 960);
+    showTab (proc.uiTab);
     startTimerHz (30);
+}
+
+void SlowSippinEditor::showTab (int t)
+{
+    tab = t;
+    proc.uiTab = t;
+    for (auto* r : rows) r->setVisible (t == 0);
+    for (auto* b : toggles) b->setVisible (t == 0);
+    for (auto* r : fxRows) r->setVisible (t == 1);
+    xy.setVisible (t == 1);
+    xChips.setVisible (t == 1);
+    yChips.setVisible (t == 1);
+    engineTab.setToggleState (t == 0, juce::dontSendNotification);
+    fxTab.setToggleState (t == 1, juce::dontSendNotification);
+    repaint();
 }
 
 SlowSippinEditor::~SlowSippinEditor()
@@ -470,9 +588,10 @@ void SlowSippinEditor::resized()
 {
     auto r = getLocalBounds();
     r.removeFromTop (6);
-    header = r.removeFromTop (88);
-    footer = r.removeFromBottom (86);
-    const int lw = (int) (r.getWidth() * 0.52f);
+    header = r.removeFromTop (84);
+    footer = r.removeFromBottom (80);
+    lfoStrip = r.removeFromBottom (138);
+    const int lw = (int) (r.getWidth() * 0.5f);
     left = r.removeFromLeft (lw);
     right = r;
 
@@ -483,29 +602,35 @@ void SlowSippinEditor::resized()
     }
 
     {
-        auto l = left.reduced (40, 30);
-        const int avail = l.getHeight() - 2 * 64;
+        auto l = left.reduced (36, 22);
+        const int avail = l.getHeight() - 2 * 60;
         source.setBounds (l.removeFromTop ((int) (avail * 0.55f)));
-        auto row1 = l.removeFromTop (64).withTrimmedTop (14);
+        auto row1 = l.removeFromTop (60).withTrimmedTop (12);
         auditionBtn.setBounds (row1.removeFromLeft (130).withHeight (42));
         srcHint = row1.withTrimmedLeft (18).withHeight (42);
         l.removeFromTop (4);
-        auto row2 = l.removeFromBottom (64).withTrimmedTop (16);
+        auto row2 = l.removeFromBottom (60).withTrimmedTop (14);
         output.setBounds (l);
-        playBtn.setBounds (row2.removeFromLeft (110).withHeight (46));
+        playBtn.setBounds (row2.removeFromLeft (110).withHeight (44));
         row2.removeFromLeft (14);
-        stopBtn.setBounds (row2.removeFromLeft (100).withHeight (46));
-        outHint = row2.withTrimmedLeft (18).withHeight (46);
+        stopBtn.setBounds (row2.removeFromLeft (100).withHeight (44));
+        outHint = row2.withTrimmedLeft (18).withHeight (44);
     }
 
+    auto rr = right.reduced (36, 14);
     {
-        auto rr = right.reduced (40, 26);
-        legendArea = rr.removeFromBottom (40);
-        auto tg = rr.removeFromBottom (78);
-        const int rowH = juce::jmin (56, rr.getHeight() / (int) rows.size());
-        rr.removeFromTop (juce::jmax (0, rr.getHeight() - rowH * rows.size()) / 2);
-        for (auto* row : rows) row->setBounds (rr.removeFromTop (rowH));
-        tg.removeFromTop (14);
+        auto tabs = rr.removeFromTop (34);
+        engineTab.setBounds (tabs.removeFromLeft (118));
+        tabs.removeFromLeft (8);
+        fxTab.setBounds (tabs.removeFromLeft (130));
+        rr.removeFromTop (12);
+    }
+    {
+        auto e = rr;
+        auto tg = e.removeFromBottom (64);
+        const int rowH = juce::jmin (50, e.getHeight() / juce::jmax (1, rows.size()));
+        for (auto* row : rows) row->setBounds (e.removeFromTop (rowH));
+        tg.removeFromTop (4);
         auto line1 = tg.removeFromTop (30), line2 = tg.removeFromTop (30);
         const int tw = line1.getWidth() / 3;
         for (int i = 0; i < toggles.size(); ++i)
@@ -514,9 +639,46 @@ void SlowSippinEditor::resized()
             toggles[i]->setBounds (ln.removeFromLeft (tw).withWidth (juce::jmin (tw, 200)));
         }
     }
+    {
+        auto f = rr;
+        const int padSize = juce::jmax (160, juce::jmin (f.getHeight() - 100, (int) (f.getWidth() * 0.47f)));
+        auto col = f.removeFromLeft (padSize);
+        f.removeFromLeft (24);
+        xy.setBounds (col.removeFromTop (padSize));
+        col.removeFromTop (6);
+        xyLabels = col.removeFromTop (24);
+        auto xl = xyLabels;
+        xl.removeFromLeft (16);
+        xChips.setBounds (xl.removeFromLeft (xl.getWidth() / 2 - 12));
+        xl.removeFromLeft (28);
+        yChips.setBounds (xl);
+        col.removeFromTop (8);
+        if (! fxRows.isEmpty()) fxRows[0]->setBounds (col.removeFromTop (juce::jmin (44, col.getHeight())));   // FX MIX (dry / wet)
+
+        static const char* names[] = { "CHORUS", "DUB ECHO", "FILTER", "SPECTRAL" };
+        static const int counts[] = { 2, 3, 3, 3 };
+        const int headH = 20, gap = 6;
+        const int rowH = juce::jmin (38, (f.getHeight() - 4 * (headH + gap)) / 11);
+        fxHeadings.clear();
+        int idx = 1;
+        for (int gI = 0; gI < 4; ++gI)
+        {
+            fxHeadings.add ({ names[gI], f.removeFromTop (headH) });
+            for (int k = 0; k < counts[gI] && idx < fxRows.size(); ++k) fxRows[idx++]->setBounds (f.removeFromTop (rowH));
+            f.removeFromTop (gap);
+        }
+    }
 
     {
-        auto f = footer.reduced (40, 18);
+        auto st = lfoStrip.reduced (36, 10);
+        legendArea = st.removeFromTop (22);
+        st.removeFromTop (4);
+        const int gap = 10, tw = (st.getWidth() - gap * (ss::kNumLfos - 1)) / ss::kNumLfos;
+        for (auto* t : lfos) { t->setBounds (st.removeFromLeft (tw)); st.removeFromLeft (gap); }
+    }
+
+    {
+        auto f = footer.reduced (40, 16);
         auto ex = f.removeFromRight (juce::jmin (640, f.getWidth() * 55 / 100));
         statsArea = f;
         auto top = ex.removeFromTop (42);
@@ -582,13 +744,38 @@ void SlowSippinEditor::paint (juce::Graphics& g)
     g.drawText (U8 ("drag = select · click = point · dbl-click = clear"), srcHint, juce::Justification::centredLeft);
     g.drawFittedText (U8 ("click the output to set the start point · space = play/stop"), outHint, juce::Justification::centredLeft, 2);
 
-    // legend
-    g.setColour (Colours::red);
-    g.fillEllipse ((float) legendArea.getX(), (float) legendArea.getY() + 7, 5.0f, 5.0f);
+    // tabs
+    {
+        auto tb = (tab == 0 ? engineTab : fxTab).getBounds();
+        g.setColour (Colours::red);
+        g.fillRect (tb.getX(), tb.getBottom() + 3, tb.getWidth(), 3);
+    }
+    if (tab == 1)
+    {
+        g.setFont (Fonts::sans (11.5f, Fonts::Bold, 0.2f));
+        for (auto& hd : fxHeadings)
+        {
+            g.setColour (Colours::ink);
+            g.drawText (hd.first, hd.second, juce::Justification::bottomLeft);
+            g.setColour (Colours::line);
+            g.fillRect (hd.second.getX(), hd.second.getBottom(), hd.second.getWidth(), 1);
+        }
+        g.setColour (Colours::muted);
+        g.setFont (Fonts::sans (10.5f, Fonts::SemiBold, 0.18f));
+        g.drawText ("X", xyLabels.withWidth (14), juce::Justification::centredLeft);
+        g.drawText ("Y", xChips.getRight() + 10, xyLabels.getY(), 14, xyLabels.getHeight(), juce::Justification::centredLeft);
+    }
+
+    // modulation strip
+    g.setColour (Colours::line);
+    g.fillRect (0, lfoStrip.getY(), getWidth(), 1);
+    g.setColour (Colours::ink);
+    g.setFont (Fonts::sans (11.5f, Fonts::Bold, 0.2f));
+    g.drawText ("MODULATION", legendArea, juce::Justification::centredLeft);
     g.setColour (Colours::muted);
-    g.setFont (Fonts::mono (11.5f));
-    g.drawFittedText ("engine controls - every control is live; MIDI notes play from C3 (key track),\nattack / release shape notes, RENDER & SAVE writes the full one-shot to a file",
-                      legendArea.withTrimmedLeft (12), juce::Justification::topLeft, 2);
+    g.setFont (Fonts::mono (11.0f));
+    g.drawFittedText (U8 ("drag an LFO's coloured header onto any control, the XY pad or the waveform  ·  drag a chip up/down = depth  ·  double-click a chip = remove"),
+                      legendArea.withTrimmedLeft (118), juce::Justification::centredLeft, 1, 0.8f);
 
     // footer stats
     const auto s = proc.offlineSettings();
@@ -654,8 +841,18 @@ void SlowSippinEditor::setStatus (const juce::String& s, bool error, int holdMs)
 void SlowSippinEditor::timerCallback()
 {
     for (auto* r : rows) r->refresh();
+    for (auto* r : fxRows) r->refresh();
     output.update();
+    source.syncChips();
     source.repaint();
+    xChips.sync();
+    yChips.sync();
+    if (tab == 1) xy.repaint();
+    {
+        float v[ss::kNumLfos];
+        proc.lfoValuesNow (v);
+        for (int i = 0; i < lfos.size(); ++i) lfos[i]->tick (v[i]);
+    }
 
     auto d = proc.getSample();
     const bool busy = proc.exporter.isBusy();

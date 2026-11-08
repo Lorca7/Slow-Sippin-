@@ -35,6 +35,13 @@ SlowSippinProcessor::SlowSippinProcessor()
     for (const auto& c : ss::controlSpecs()) params[c.id] = apvts.getRawParameterValue (c.id);
     for (const auto& t : ss::toggleSpecs()) params[t.id] = apvts.getRawParameterValue (t.id);
     engine.shared = &shared;
+    shared.mod = &mod;
+    for (int t = 0; t < ss::kNumTargets; ++t) targetParam[(size_t) t] = apvts.getRawParameterValue (ss::targetParamId (t));
+    for (int i = 0; i < ss::kNumLfos; ++i)
+    {
+        lfoRateParam[i] = apvts.getRawParameterValue (ss::lfoRateId (i));
+        lfoShapeParam[i] = apvts.getRawParameterValue (ss::lfoShapeId (i));
+    }
     engine.currentSample = [this] { return getSample(); };
     startTimerHz (10);
 }
@@ -64,6 +71,9 @@ void SlowSippinProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     wet.setSize (2, maxBlock);
     const juce::dsp::ProcessSpec spec { sr, (juce::uint32) maxBlock, 2 };
     reverb.prepare (spec);
+    fx.prepare (sr, maxBlock);
+    chunkWet.assign ((size_t) (maxBlock / kModChunk + 2), 0.0f);
+    chunkGain.assign ((size_t) (maxBlock / kModChunk + 2), 1.0f);
     limiter.prepare (spec);
     limiter.setThreshold (-0.5f);
     limiter.setRelease (80.0f);
@@ -124,22 +134,37 @@ void SlowSippinProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         }
     }
 
-    // parameters → engine
+    // parameters → engine (the render threads add LFO modulation themselves, at their own time)
     shared.stretch.store (param ("stretch"));
     shared.pitch.store (param ("pitch"));
     shared.weave.store ((int) std::lround (param ("weave")));
     shared.scatter.store (param ("scatter") / 100.0f);
     shared.driftMs.store (param ("drift"));
+    shared.window.store (param ("window"));
     shared.loop.store (param ("loop") > 0.5f);
     shared.reverse.store (param ("reverse") > 0.5f);
     shared.monoStereo.store (param ("monoStereo") > 0.5f);
-    engine.setEnvelope (param ("attack"), param ("release"));
     engine.setKeyTrack (param ("keyTrack") > 0.5f);
+
+    // LFOs: advance and publish the shared clock
+    {
+        float rates[ss::kNumLfos];
+        int shapes[ss::kNumLfos];
+        for (int i = 0; i < ss::kNumLfos; ++i)
+        {
+            rates[i] = lfoRateParam[i]->load();
+            shapes[i] = juce::jlimit (0, ss::kNumShapes - 1, (int) std::lround (lfoShapeParam[i]->load()));
+        }
+        mod.advance (clock, n, sr, rates, shapes);
+    }
+    float lfoNow[ss::kNumLfos];
+    mod.lfoValuesAt (clock, lfoNow);
+    engine.setEnvelope (mod.apply (ss::tAttack, param ("attack"), lfoNow), mod.apply (ss::tRelease, param ("release"), lfoNow));
 
     // transport requests from the UI
     if (stopReq.exchange (false)) engine.stopTransport();
     if (playReq.exchange (false) && audioSample != nullptr && ! engine.transportActive())
-        engine.noteOn (60, 1.0f, true, startFrac.load(), (uint32_t) rng.nextInt() | 1u);
+        engine.noteOn (60, 1.0f, true, startFrac.load(), (uint32_t) rng.nextInt() | 1u, clock);
     const float j = jumpReq.exchange (-1.0f);
     if (j >= 0) engine.jumpTransport (j);
     if (auditionReq.exchange (false))
@@ -158,7 +183,7 @@ void SlowSippinProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         if (m.isNoteOn())
         {
             if (audioSample != nullptr)
-                engine.noteOn (m.getNoteNumber(), 0.25f + 0.75f * m.getFloatVelocity(), false, startFrac.load(), (uint32_t) rng.nextInt() | 1u);
+                engine.noteOn (m.getNoteNumber(), 0.25f + 0.75f * m.getFloatVelocity(), false, startFrac.load(), (uint32_t) rng.nextInt() | 1u, clock + t);
         }
         else if (m.isNoteOff()) engine.noteOff (m.getNoteNumber());
         else if (m.isSustainPedalOn()) engine.setSustain (true);
@@ -168,20 +193,49 @@ void SlowSippinProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     }
     if (pos < n) engine.render (L + pos, R + pos, n - pos, offline);
 
-    // post: reverb → normalize → gain → (limiter)
+    // post: normalize → effects (XY blend) → reverb → gain → (limiter), modulated every 64 samples
     const bool normalize = param ("normalize") > 0.5f;
-    const float a = param ("reverb") / 100.0f;
-    sDry.setTargetValue (1.0f);          // REVERB only adds reverb; it never turns the dry sound down
-    sWet.setTargetValue (a);
-    sGain.setTargetValue (juce::Decibels::decibelsToGain (param ("gain"), -100.0f));
     const float pk = analyzer.peak();
     sNorm.setTargetValue (normalize && pk > 1e-6f ? juce::jmin (100.0f, kNormTarget / pk) : 1.0f);
 
     for (int off = 0; off < n; off += maxBlock)
     {
         const int len = juce::jmin (maxBlock, n - off);
-        const bool useWet = a > 0.0f || sWet.isSmoothing();
-        if (useWet)
+        bool anyWet = sWet.isSmoothing() || sWet.getCurrentValue() > 0.0f;
+        int nc = 0;
+        for (int c = 0; c < len; c += kModChunk, ++nc)
+        {
+            const int cl = juce::jmin (kModChunk, len - c);
+            float lfo[ss::kNumLfos];
+            mod.lfoValuesAt (clock + off + c, lfo);
+            auto mv = [&] (int t) { return mod.apply (t, targetParam[(size_t) t]->load(), lfo); };
+            ss::FxParams fp;
+            fp.mix = mv (ss::tFxMix) / 100.0f;
+            fp.x = mv (ss::tFxX) / 100.0f;
+            fp.y = mv (ss::tFxY) / 100.0f;
+            fp.chRate = mv (ss::tChRate);
+            fp.chDepth = mv (ss::tChDepth) / 100.0f;
+            fp.echoTimeMs = mv (ss::tEchoTime);
+            fp.echoFb = mv (ss::tEchoFb) / 100.0f;
+            fp.echoTone = mv (ss::tEchoTone) / 100.0f;
+            fp.cutHz = mv (ss::tFltCut);
+            fp.res = mv (ss::tFltRes) / 100.0f;
+            fp.type = mv (ss::tFltType) / 100.0f;
+            fp.blur = mv (ss::tSpBlur) / 100.0f;
+            fp.shiftSt = mv (ss::tSpShift);
+            fp.thin = mv (ss::tSpThin) / 100.0f;
+            chunkWet[(size_t) nc] = mv (ss::tReverb) / 100.0f;
+            chunkGain[(size_t) nc] = juce::Decibels::decibelsToGain (mv (ss::tGain), -100.0f);
+            if (chunkWet[(size_t) nc] > 0.0f) anyWet = true;
+            for (int i = 0; i < cl; ++i)
+            {
+                const float g = sNorm.getNextValue();
+                L[off + c + i] *= g;
+                R[off + c + i] *= g;
+            }
+            fx.process (L + off + c, R + off + c, cl, fp);
+        }
+        if (anyWet)
         {
             wet.copyFrom (0, 0, L + off, len);
             wet.copyFrom (1, 0, R + off, len);
@@ -190,14 +244,20 @@ void SlowSippinProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         }
         const float* wL = wet.getReadPointer (0);
         const float* wR = wet.getReadPointer (1);
-        for (int i = 0; i < len; ++i)
+        nc = 0;
+        for (int c = 0; c < len; c += kModChunk, ++nc)
         {
-            const float d = sDry.getNextValue(), w = sWet.getNextValue();
-            const float g = sGain.getNextValue() * sNorm.getNextValue();
-            float l = L[off + i] * d, r = R[off + i] * d;
-            if (useWet) { l += wL[i] * w; r += wR[i] * w; }
-            L[off + i] = l * g;
-            R[off + i] = r * g;
+            const int cl = juce::jmin (kModChunk, len - c);
+            sWet.setTargetValue (chunkWet[(size_t) nc]);       // REVERB only adds reverb; the dry sound stays
+            sGain.setTargetValue (chunkGain[(size_t) nc]);
+            for (int i = c; i < c + cl; ++i)
+            {
+                const float w = sWet.getNextValue(), g = sGain.getNextValue();
+                float l = L[off + i], r = R[off + i];
+                if (anyWet) { l += wL[i] * w; r += wR[i] * w; }
+                L[off + i] = l * g;
+                R[off + i] = r * g;
+            }
         }
         if (normalize)
         {
@@ -246,6 +306,8 @@ void SlowSippinProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         }
     }
     outLevel.store (juce::jmax (blockPeak, outLevel.load() * 0.9f));
+    clock += n;
+    audioClock.store (clock);
 }
 
 int SlowSippinProcessor::readScope (float* dest, int max)
@@ -389,6 +451,16 @@ ss::OfflineSettings SlowSippinProcessor::offlineSettings() const
     s.sizeSec = param ("size");
     s.gainDb = param ("gain");
     s.normalize = param ("normalize") > 0.5f;
+    for (int t = 0; t < ss::kNumTargets; ++t) s.base[(size_t) t] = targetParam[(size_t) t]->load();
+    for (int i = 0; i < ss::kNumLfos; ++i)
+    {
+        s.lfoRate[i] = lfoRateParam[i]->load();
+        s.lfoShape[i] = juce::jlimit (0, ss::kNumShapes - 1, (int) std::lround (lfoShapeParam[i]->load()));
+    }
+    s.routes = mod.snapshotRoutes();
+    s.mod = &mod;
+    const float pk = analyzer.peak();
+    s.preGain = s.normalize && pk > 1e-6f ? juce::jmin (100.0f, kNormTarget / pk) : 1.0f;
     return s;
 }
 
@@ -405,6 +477,8 @@ void SlowSippinProcessor::getStateInformation (juce::MemoryBlock& dest)
     session.setProperty ("startFrac", startFrac.load(), nullptr);
     session.setProperty ("exportFormat", exportFormat, nullptr);
     session.setProperty ("exportBits", exportBits, nullptr);
+    session.setProperty ("tab", uiTab, nullptr);
+    session.appendChild (mod.toTree(), nullptr);
     state.appendChild (session, nullptr);
     if (auto xml = state.createXml()) copyXmlToBinary (*xml, dest);
 }
@@ -419,8 +493,10 @@ void SlowSippinProcessor::setStateInformation (const void* data, int size)
     tree.removeChild (tree.getChildWithName ("SESSION"), nullptr);
     apvts.replaceState (tree);
 
+    mod.fromTree (session.getChildWithName ("MOD"));
     exportFormat = session.getProperty ("exportFormat", 0);
     exportBits = session.getProperty ("exportBits", 24);
+    uiTab = session.getProperty ("tab", 0);
     startFrac.store ((float) (double) session.getProperty ("startFrac", 0.0));
     const juce::String path = session.getProperty ("sample", "");
     const int a = session.getProperty ("regionA", 0), b = session.getProperty ("regionB", 0);

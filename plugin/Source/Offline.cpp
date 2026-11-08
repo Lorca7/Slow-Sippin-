@@ -9,19 +9,7 @@ static constexpr uint32_t kIrSeed = 90210;
 
 SourceView makeView (const SampleData& d, int a, int b) noexcept
 {
-    a = juce::jlimit (0, d.length, a);
-    b = juce::jlimit (0, d.length, b);
-    if (b - a < 16) { a = 0; b = d.length; }
-    SourceView v;
-    v.numChannels = d.numChannels;
-    v.len = b - a;
-    v.sampleRate = d.sampleRate;
-    for (int c = 0; c < d.numChannels; ++c)
-    {
-        v.fwd[c] = d.fwd.getReadPointer (c) + a;
-        v.rev[c] = d.rev.getReadPointer (c) + (d.length - b);
-    }
-    return v;
+    return regionView (d, a, b, 0.0f);
 }
 
 // ============================================================ PcmWriter
@@ -271,13 +259,28 @@ void Exporter::estimate (const OfflineSettings& s, int64_t& frames, int& channel
     rate = view.sampleRate;
     frames = (int64_t) std::llround (view.len * s.stream.stretch) + windowSizeFor (rate) / 2;
     if (s.reverbPct > 0) frames += irLength (rate, s.sizeSec) - 1;
-    channels = (view.numChannels == 1 && ! s.stream.monoToStereo && s.reverbPct <= 0) ? 1 : 2;
+    channels = (view.numChannels == 1 && ! s.stream.monoToStereo && s.reverbPct <= 0 && s.base[tFxMix] <= 0) ? 1 : 2;
 }
 
 bool Exporter::start (const OfflineSettings& s, const juce::File& file, int format, int bits)
 {
     if (isThreadRunning() || s.data == nullptr) return false;
     job = s;
+    if (job.mod == nullptr)
+    {
+        // no modulation data supplied: take everything from the plain settings, effects off
+        for (int t = 0; t < kNumTargets; ++t)
+            if (auto* sp = findSpec (targetParamId (t))) job.base[(size_t) t] = sp->def;
+        job.base[tStretch] = (float) job.stream.stretch;
+        job.base[tPitch] = (float) job.stream.pitchSemis;
+        job.base[tWeave] = (float) job.stream.weave;
+        job.base[tScatter] = (float) job.stream.scatter * 100.0f;
+        job.base[tDrift] = (float) job.stream.driftMs;
+        job.base[tWindow] = 0;
+        job.base[tReverb] = job.reverbPct;
+        job.base[tGain] = job.gainDb;
+        job.base[tFxMix] = 0;
+    }
     job.stream.loop = false;
     { const juce::ScopedLock sl (msgLock); outFile = file; msg = {}; }
     fmt = format;
@@ -316,18 +319,28 @@ void Exporter::run()
     struct Cleanup { juce::File f; ~Cleanup() { f.deleteFile(); } } cleanup { temp };
 
     // ---------------- pass 1: render → temporary float file, measure peak
+    // stretch (modulated) → effects (modulated) → reverb (wet modulated) → gain modulation.
+    // The file's base GAIN is applied in pass 2, after NORMALIZE, as when playing.
     float peak = 0;
-    uint64_t written = 0;
+    uint64_t written = 0, lastLoud = 0;
     {
         temp.deleteFile();
         juce::FileOutputStream tmp (temp, 1 << 20);
         if (! tmp.openedOk()) { finish (Failed, "cannot write to " + dir.getFullPathName()); return; }
 
+        auto modv = [this] (int t, const float* lfo)
+        {
+            return job.mod != nullptr ? job.mod->apply (t, job.base[(size_t) t], lfo, job.routes) : job.base[(size_t) t];
+        };
+        auto routed = [this] (int t) { for (const auto& r : job.routes) if (r.lfo >= 0 && r.target == t) return true; return false; };
+
         StretchStream stream;
         stream.prepare (rate);
         stream.start (0.0, (uint32_t) juce::Random::getSystemRandom().nextInt() | 1u, job.stream.reverse, view.len);
+        FxChain fx;
+        fx.prepare (rate, 256);
 
-        const bool rev = job.reverbPct > 0;
+        const bool rev = job.base[tReverb] > 0 || routed (tReverb);
         StreamConvolver convL, convR;
         if (rev)
         {
@@ -337,59 +350,91 @@ void Exporter::run()
             convR.prepare (irR);
         }
         const int block = rev ? convL.blockSize() : 65536;
-        const float wet = (float) (job.reverbPct / 100.0);   // reverb is added on top of the dry sound
+        const int sub = 256;
+        const float baseGain = juce::Decibels::decibelsToGain (job.base[tGain], -100.0f);
         std::vector<float> L ((size_t) block), R ((size_t) block), wL ((size_t) block), wR ((size_t) block);
+        std::vector<float> wetA ((size_t) block), gainA ((size_t) block);
         std::vector<float> il ((size_t) block * (size_t) ch);
-        const int64_t irTail = rev ? irLength (rate, job.sizeSec) - 1 : 0;
+        const int64_t maxFrames = (int64_t) (kMaxSeconds * rate);
+        const int64_t maxTail = (int64_t) ((60.0 + 3.0 * job.sizeSec) * rate);
         bool engineDone = false;
-        int64_t tailLeft = irTail;
+        int64_t afterEnd = 0;
 
         while (true)
         {
             if (threadShouldExit()) { finish (Cancelled, "export cancelled"); return; }
             std::fill (L.begin(), L.end(), 0.0f);
             std::fill (R.begin(), R.end(), 0.0f);
-            int valid = 0;
-            if (! engineDone)
+            for (int o = 0; o < block; o += sub)
             {
-                valid = stream.render (view, job.stream, L.data(), R.data(), block, 1.0f);
-                if (valid < block) engineDone = true;
+                const int n = std::min (sub, block - o);
+                float lfo[kNumLfos];
+                ModSystem::lfoValuesOffline ((double) (written + (uint64_t) o) / rate, job.lfoRate, job.lfoShape, lfo);
+                if (! engineDone)
+                {
+                    StreamSettings st = job.stream;
+                    st.stretch = modv (tStretch, lfo);
+                    st.pitchSemis = modv (tPitch, lfo);
+                    st.weave = (int) modv (tWeave, lfo);
+                    st.scatter = modv (tScatter, lfo) / 100.0f;
+                    st.driftMs = modv (tDrift, lfo);
+                    const auto v = regionView (*job.data, job.regionA, job.regionB, modv (tWindow, lfo));
+                    if (stream.render (v, st, L.data() + o, R.data() + o, n, job.preGain) < n) engineDone = true;
+                }
+                FxParams fp;
+                fp.mix = modv (tFxMix, lfo) / 100.0f;
+                fp.x = modv (tFxX, lfo) / 100.0f;
+                fp.y = modv (tFxY, lfo) / 100.0f;
+                fp.chRate = modv (tChRate, lfo);
+                fp.chDepth = modv (tChDepth, lfo) / 100.0f;
+                fp.echoTimeMs = modv (tEchoTime, lfo);
+                fp.echoFb = modv (tEchoFb, lfo) / 100.0f;
+                fp.echoTone = modv (tEchoTone, lfo) / 100.0f;
+                fp.cutHz = modv (tFltCut, lfo);
+                fp.res = modv (tFltRes, lfo) / 100.0f;
+                fp.type = modv (tFltType, lfo) / 100.0f;
+                fp.blur = modv (tSpBlur, lfo) / 100.0f;
+                fp.shiftSt = modv (tSpShift, lfo);
+                fp.thin = modv (tSpThin, lfo) / 100.0f;
+                fx.process (L.data() + o, R.data() + o, n, fp);
+                const float wet = modv (tReverb, lfo) / 100.0f;
+                const float g = juce::Decibels::decibelsToGain (modv (tGain, lfo), -100.0f) / juce::jmax (1.0e-6f, baseGain);
+                std::fill (wetA.begin() + o, wetA.begin() + o + n, wet);
+                std::fill (gainA.begin() + o, gainA.begin() + o + n, g);
             }
-            int emit = valid;
             if (rev)
             {
                 convL.process (L.data(), wL.data());
                 convR.process (R.data(), wR.data());
-                if (engineDone)
-                {
-                    const int extra = (int) std::min<int64_t> (tailLeft, block - valid);
-                    tailLeft -= extra;
-                    emit = valid + extra;
-                }
-                for (int i = 0; i < emit; ++i)
-                {
-                    L[(size_t) i] += wet * wL[(size_t) i];
-                    R[(size_t) i] += wet * wR[(size_t) i];
-                }
             }
-            for (int i = 0; i < emit; ++i)
+            float blockPeak = 0;
+            for (int i = 0; i < block; ++i)
             {
-                peak = juce::jmax (peak, std::abs (L[(size_t) i]), std::abs (R[(size_t) i]));
-                if (ch == 2) { il[(size_t) (2 * i)] = L[(size_t) i]; il[(size_t) (2 * i + 1)] = R[(size_t) i]; }
-                else il[(size_t) i] = L[(size_t) i];
+                float l = L[(size_t) i], r = R[(size_t) i];
+                if (rev) { l += wetA[(size_t) i] * wL[(size_t) i]; r += wetA[(size_t) i] * wR[(size_t) i]; }
+                l *= gainA[(size_t) i];
+                r *= gainA[(size_t) i];
+                const float a = std::max (std::abs (l), std::abs (r));
+                if (a > 1.0e-5f) lastLoud = written + (uint64_t) i + 1;
+                blockPeak = std::max (blockPeak, a);
+                peak = std::max (peak, a);
+                if (ch == 2) { il[(size_t) (2 * i)] = l; il[(size_t) (2 * i + 1)] = r; }
+                else il[(size_t) i] = l;
             }
-            if (emit > 0 && ! tmp.write (il.data(), (size_t) emit * (size_t) ch * sizeof (float)))
-            {
-                finish (Failed, "disk full or write error");
-                return;
-            }
-            written += (uint64_t) emit;
+            if (! tmp.write (il.data(), (size_t) block * (size_t) ch * sizeof (float))) { finish (Failed, "disk full or write error"); return; }
+            written += (uint64_t) block;
             prog.store (0.9f * (float) juce::jmin (1.0, (double) written / (double) juce::jmax<int64_t> (1, estFrames)));
-            if (engineDone && (! rev || tailLeft <= 0)) break;
+            if (engineDone)
+            {
+                afterEnd += block;
+                if (blockPeak < 1.0e-6f || afterEnd > maxTail) break;      // effect / reverb tails have died away
+            }
+            if ((int64_t) written > maxFrames) break;
         }
         tmp.flush();
         if (tmp.getStatus().failed()) { finish (Failed, "disk full or write error"); return; }
     }
+    written = juce::jmax<uint64_t> (1, lastLoud);     // trim trailing silence
 
     // ---------------- pass 2: normalize + gain → final format
     const float norm = job.normalize ? std::pow (10.0f, -0.5f / 20.0f) / juce::jmax (1e-9f, peak) : 1.0f;

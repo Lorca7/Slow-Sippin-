@@ -50,8 +50,42 @@ There's no Render step: the stretch is computed live, so every control can be ch
 | **Reverse** | Plays the stretched sound backwards. |
 | **Loop** | Off: a one-shot lasting region × stretch. On: the region loops seamlessly, for endless drones. |
 | **Key track** | MIDI notes transpose the sound. Off: every key plays at the Pitch setting. |
+| **Window** | Moves the selected region across the sample (±100 % = its full travel). Drop an LFO on the waveform to scrub. |
 
-Every control is independent: changing one never moves another. Sliders ignore the scroll wheel and trackpad, so scrolling can't change a value by accident. Normalize is the one deliberate interaction: it re-measures the level when the engine controls change, keeping the output at the same safe maximum.
+### Effects (EFFECTS tab)
+
+The right-hand panel has two tabs. **EFFECTS** holds four effects that run in parallel:
+
+| Corner | Effect | Controls |
+|---|---|---|
+| top-left | **Chorus** | Rate, Depth: three slowly detuned voices |
+| top-right | **Dub Echo** | Time, Feedback (above 100 % it self-oscillates, safely saturated), Tone. It runs through a tape-style loop: darkening tone filter, saturation, gentle wow, and pitch glide when the time changes |
+| bottom-left | **Filter** | Cutoff, Resonance, LP > BP > HP (morphs from low-pass through band-pass to high-pass) |
+| bottom-right | **Spectral** | Blur (smears the spectrum over time), Shift (moves partials ±24 semitones), Thin (keeps only the strongest partials) |
+
+- **The XY pad cross-blends them.** At a corner you hear that one effect; in between you hear a mix, and the centre is all four equally. Double-click the pad to recentre it.
+- **FX MIX** is the dry/wet knob for the whole effects blend. At 0 the effects are bypassed entirely and the sound is bit-identical to dry.
+- Effects come after the stretch and before the reverb.
+
+### Modulation: 8 LFOs
+
+The **MODULATION** strip along the bottom holds 8 LFOs. Each has a shape (click the name: sine, triangle, saw up, saw down, square, S&H, wander) and a rate (0.01–20 Hz).
+
+- **Drag an LFO's coloured header** onto any control to route it there. It can also go on the **XY pad** (choose X, Y or both) or the **source waveform** (moves the window).
+- Each route shows as a **chip** on its target.
+  - **Drag the chip up/down** to set the depth (Shift for fine control).
+  - **Double-click** it to remove it; **right-click** to invert or remove.
+- A control being modulated shows a ring travelling along its slider, so you can see where the LFO is pushing it.
+- One LFO can drive many controls, and one control can take several LFOs.
+- Depth is relative to the control's full range: 100 % sweeps the whole range.
+
+**Scrubbing with the WINDOW.** The WINDOW control (ENGINE tab) moves your selected region across the sample: ±100 % is its full travel, bouncing off both ends. Drop an LFO on the source waveform and the region window travels with it while playing, which scrubs the sample under the LFO's direction. The red region on the waveform moves live, and dashed lines mark where you drew it. WINDOW needs a selected region to move; it does nothing when the whole sample is selected.
+
+**Render & Save** includes the effects and the LFO movement, so the file sounds like what you hear. The LFOs start from zero at the beginning of the file, and the file runs on until echo and reverb tails have died away.
+
+The routes, the LFO settings and the open tab are saved with your project.
+
+Every control is independent: changing one never moves another; only an LFO you routed moves anything. Sliders ignore the scroll wheel and trackpad, so scrolling can't change a value by accident. Normalize is the one deliberate interaction: it re-measures the level when the engine controls change, keeping the output at the same safe maximum.
 
 Everything is automatable from the DAW. The project remembers the sample (by file path), the region, the start point and the export settings.
 
@@ -70,6 +104,9 @@ Every push that touches `plugin/` runs `.github/workflows/build-mac.yml` on a ma
 ## Inside
 
 - `Source/StretchEngine.*` is the streaming spectral stretcher: phase vocoder with identity phase locking blended into random phase, peak-region pitch shifting, and drift. It also contains the reverb impulse and the FFT convolution. It has no JUCE dependency, and `Tests/EngineTests.cpp` tests it.
+- `Source/Effects.*`: chorus, filter, dub echo and spectral effects, and the XY blend with FX MIX. No JUCE dependency; tested in `Tests/EngineTests.cpp`.
+- `Source/Modulation.h`: the 8 LFOs and the routing table. LFOs are pure functions of time, so the render threads, which work about 100 ms ahead of what you hear, evaluate them at exactly the moment their audio will play.
+- `Source/ModUI.h`: LFO tiles, route chips and the XY pad.
 - `Source/VoiceEngine.*` holds the 8 polyphonic voices. Each voice renders about 100 ms ahead on background threads into a lock-free FIFO, so the bursty FFT work never lands on the audio thread.
 - `Source/Offline.*` contains the Normalize analyzer, the file export and the WAV/AIFF writer.
 - `Source/PluginProcessor.*` handles parameters, MIDI, transport, audition, reverb, the limiter and saved state. `Source/PluginEditor.*` and `Source/Look.h` are the UI.

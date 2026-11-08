@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_formats/juce_audio_formats.h>
+#include "StretchEngine.h"
 
 namespace ss
 {
@@ -71,5 +72,38 @@ struct SampleData : public juce::ReferenceCountedObject
         return d;
     }
 };
+
+/**
+ * The region [a, b) of `d` as a SourceView, slid by `windowPct` % of the room
+ * it has to travel (100 % = from where it was drawn all the way to the far end),
+ * reflecting off both ends of the sample. b - a < 16 means the whole sample.
+ * Shared by live playback and export, so both move the window identically.
+ */
+inline SourceView regionView (const SampleData& d, int a, int b, float windowPct) noexcept
+{
+    a = juce::jlimit (0, d.length, a);
+    b = juce::jlimit (0, d.length, b);
+    if (b - a < 16) { a = 0; b = d.length; }
+    const int len = b - a, room = d.length - len;
+    if (windowPct != 0.0f && room > 0)
+    {
+        const double period = 2.0 * room;
+        double x = std::fmod (a + windowPct / 100.0 * room, period);
+        if (x < 0) x += period;
+        if (x > room) x = period - x;
+        a = juce::jlimit (0, room, (int) x);
+        b = a + len;
+    }
+    SourceView v;
+    v.numChannels = d.numChannels;
+    v.len = len;
+    v.sampleRate = d.sampleRate;
+    for (int c = 0; c < d.numChannels; ++c)
+    {
+        v.fwd[c] = d.fwd.getReadPointer (c) + a;
+        v.rev[c] = d.rev.getReadPointer (c) + (d.length - b);
+    }
+    return v;
+}
 
 } // namespace ss

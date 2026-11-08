@@ -97,7 +97,7 @@ void VoiceEngine::setEnvelope (float attackMs, float releaseMs) noexcept
     }
 }
 
-void VoiceEngine::noteOn (int note, float velocity, bool transport, double startFrac, uint32_t seed) noexcept
+void VoiceEngine::noteOn (int note, float velocity, bool transport, double startFrac, uint32_t seed, int64_t startTime) noexcept
 {
     // free voice (fully idle) > releasing oldest > oldest
     Voice* pick = nullptr;
@@ -129,6 +129,7 @@ void VoiceEngine::noteOn (int note, float velocity, bool transport, double start
     v.env.setParameters (p);
     v.env.reset();
     v.env.noteOn();
+    v.cmdTime.store (startTime, std::memory_order_relaxed);
     command (v, 1, startFrac, seed);
     if (transport) transportOn.store (true);
 }
@@ -274,6 +275,8 @@ int VoiceEngine::workerPass (int index, int count, float* tL, float* tR)
             if (c == 1)
             {
                 v.data = currentSample ? currentSample() : nullptr;
+                v.t0 = v.cmdTime.load (std::memory_order_relaxed);
+                v.rendered = 0;
                 if (v.data != nullptr)
                 {
                     const auto view = shared->view (*v.data);
@@ -302,9 +305,11 @@ int VoiceEngine::workerPass (int index, int count, float* tL, float* tR)
 
         std::fill (tL, tL + kChunk, 0.0f);
         std::fill (tR, tR + kChunk, 0.0f);
-        const auto view = shared->view (*v.data);
-        const auto st = shared->snapshot (v.noteSemis.load (std::memory_order_relaxed));
+        float wnd = 0;
+        const auto st = shared->snapshotAt (v.noteSemis.load (std::memory_order_relaxed), v.t0 + v.rendered, wnd);
+        const auto view = shared->view (*v.data, wnd);
         const int got = v.stream.render (view, st, tL, tR, kChunk, 1.0f);
+        v.rendered += got;
         v.srcFrac.store ((float) v.stream.sourceFrac());
         v.posFrac.store ((float) v.stream.positionFrac());
 

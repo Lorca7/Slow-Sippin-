@@ -8,6 +8,9 @@ namespace ss
 /** Everything a control row needs: parameter range + how the slider maps to it. */
 struct ControlSpec
 {
+    enum Group { Engine, Output, Fx, Hidden, LfoRate };
+    enum Scale { Linear, Log, Sqrt };
+
     const char* id;
     const char* label;
     const char* unit;
@@ -15,26 +18,64 @@ struct ControlSpec
     float sMin, sMax;        // slider range (may be narrower: "the number box accepts more")
     float def;
     int decimals;
-    enum Scale { Linear, Log, Sqrt } scale;
+    Scale scale;
     bool integer;
     bool engine;             // part of the stretch engine (red dot)
+    Group group = Output;
+    bool modulatable = true; // can an LFO be dropped on it
 };
+
+constexpr int kNumLfos = 8;
 
 inline const std::vector<ControlSpec>& controlSpecs()
 {
+    using C = ControlSpec;
     static const std::vector<ControlSpec> specs {
-        { "stretch", "STRETCH", "x",  1.0f, 1000000.0f, 1.0f, 1000.0f, 20.0f, 2, ControlSpec::Log,    false, true  },
-        { "pitch",   "PITCH",   "st", -60.0f, 60.0f,  -48.0f, 48.0f,    0.0f, 1, ControlSpec::Linear, false, true  },
-        { "weave",   "WEAVE",   "",   1.0f, 16.0f,     1.0f, 16.0f,     4.0f, 0, ControlSpec::Linear, true,  true  },
-        { "scatter", "SCATTER", "%",  0.0f, 100.0f,    0.0f, 100.0f,  100.0f, 0, ControlSpec::Linear, false, true  },
-        { "drift",   "DRIFT",   "ms", 0.0f, 10000.0f,  0.0f, 1000.0f,   0.0f, 0, ControlSpec::Sqrt,   false, true  },
-        { "reverb",  "REVERB",  "%",  0.0f, 100.0f,    0.0f, 100.0f,    0.0f, 0, ControlSpec::Linear, false, false },
-        { "size",    "SIZE",    "s",  0.1f, 30.0f,     0.2f, 20.0f,     2.5f, 1, ControlSpec::Log,    false, false },
-        { "gain",    "GAIN",    "dB", -60.0f, 24.0f,  -24.0f, 24.0f,    0.0f, 1, ControlSpec::Linear, false, false },
-        { "attack",  "ATTACK",  "ms", 0.0f, 20000.0f,  0.0f, 10000.0f, 40.0f, 0, ControlSpec::Sqrt,   false, false },
-        { "release", "RELEASE", "ms", 0.0f, 30000.0f,  0.0f, 20000.0f, 1500.0f, 0, ControlSpec::Sqrt, false, false },
+        // ---- stretch engine
+        { "stretch", "STRETCH", "x",  1.0f, 1000000.0f, 1.0f, 1000.0f, 20.0f, 2, C::Log,    false, true,  C::Engine },
+        { "pitch",   "PITCH",   "st", -60.0f, 60.0f,  -48.0f, 48.0f,    0.0f, 1, C::Linear, false, true,  C::Engine },
+        { "weave",   "WEAVE",   "",   1.0f, 16.0f,     1.0f, 16.0f,     4.0f, 0, C::Linear, true,  true,  C::Engine },
+        { "scatter", "SCATTER", "%",  0.0f, 100.0f,    0.0f, 100.0f,  100.0f, 0, C::Linear, false, true,  C::Engine },
+        { "drift",   "DRIFT",   "ms", 0.0f, 10000.0f,  0.0f, 1000.0f,   0.0f, 0, C::Sqrt,   false, true,  C::Engine },
+        { "window",  "WINDOW",  "%",  -100.0f, 100.0f, -100.0f, 100.0f, 0.0f, 1, C::Linear, false, true,  C::Engine },
+        // ---- output
+        { "reverb",  "REVERB",  "%",  0.0f, 100.0f,    0.0f, 100.0f,    0.0f, 0, C::Linear, false, false, C::Output },
+        { "size",    "SIZE",    "s",  0.1f, 30.0f,     0.2f, 20.0f,     2.5f, 1, C::Log,    false, false, C::Output, false },
+        { "gain",    "GAIN",    "dB", -60.0f, 24.0f,  -24.0f, 24.0f,    0.0f, 1, C::Linear, false, false, C::Output },
+        { "attack",  "ATTACK",  "ms", 0.0f, 20000.0f,  0.0f, 10000.0f, 40.0f, 0, C::Sqrt,   false, false, C::Output },
+        { "release", "RELEASE", "ms", 0.0f, 30000.0f,  0.0f, 20000.0f, 1500.0f, 0, C::Sqrt, false, false, C::Output },
+        // ---- effects (XY pad blends chorus / echo / filter / spectral)
+        { "fxMix",    "FX MIX",    "%",  0.0f, 100.0f,   0.0f, 100.0f,    0.0f, 0, C::Linear, false, false, C::Fx },
+        { "fxX",      "X",         "%",  0.0f, 100.0f,   0.0f, 100.0f,   50.0f, 0, C::Linear, false, false, C::Hidden },
+        { "fxY",      "Y",         "%",  0.0f, 100.0f,   0.0f, 100.0f,   50.0f, 0, C::Linear, false, false, C::Hidden },
+        { "chRate",   "RATE",      "Hz", 0.02f, 8.0f,    0.02f, 8.0f,    0.35f, 2, C::Log,    false, false, C::Fx },
+        { "chDepth",  "DEPTH",     "%",  0.0f, 100.0f,   0.0f, 100.0f,   50.0f, 0, C::Linear, false, false, C::Fx },
+        { "echoTime", "TIME",      "ms", 20.0f, 2000.0f, 20.0f, 2000.0f, 375.0f, 0, C::Log,   false, false, C::Fx },
+        { "echoFb",   "FEEDBACK",  "%",  0.0f, 110.0f,   0.0f, 110.0f,   55.0f, 0, C::Linear, false, false, C::Fx },
+        { "echoTone", "TONE",      "%",  0.0f, 100.0f,   0.0f, 100.0f,   45.0f, 0, C::Linear, false, false, C::Fx },
+        { "fltCut",   "CUTOFF",    "Hz", 20.0f, 20000.0f, 20.0f, 20000.0f, 1200.0f, 0, C::Log, false, false, C::Fx },
+        { "fltRes",   "RESONANCE", "%",  0.0f, 100.0f,   0.0f, 100.0f,   30.0f, 0, C::Linear, false, false, C::Fx },
+        { "fltType",  "LP > BP > HP", "%", 0.0f, 100.0f, 0.0f, 100.0f,    0.0f, 0, C::Linear, false, false, C::Fx },
+        { "spBlur",   "BLUR",      "%",  0.0f, 100.0f,   0.0f, 100.0f,   60.0f, 0, C::Linear, false, false, C::Fx },
+        { "spShift",  "SHIFT",     "st", -24.0f, 24.0f, -24.0f, 24.0f,    0.0f, 1, C::Linear, false, false, C::Fx },
+        { "spThin",   "THIN",      "%",  0.0f, 100.0f,   0.0f, 100.0f,    0.0f, 0, C::Linear, false, false, C::Fx },
+        // ---- LFO rates
+        { "lfo1Rate", "LFO 1", "Hz", 0.01f, 20.0f, 0.01f, 20.0f, 0.10f, 2, C::Log, false, false, C::LfoRate, false },
+        { "lfo2Rate", "LFO 2", "Hz", 0.01f, 20.0f, 0.01f, 20.0f, 0.25f, 2, C::Log, false, false, C::LfoRate, false },
+        { "lfo3Rate", "LFO 3", "Hz", 0.01f, 20.0f, 0.01f, 20.0f, 0.50f, 2, C::Log, false, false, C::LfoRate, false },
+        { "lfo4Rate", "LFO 4", "Hz", 0.01f, 20.0f, 0.01f, 20.0f, 1.00f, 2, C::Log, false, false, C::LfoRate, false },
+        { "lfo5Rate", "LFO 5", "Hz", 0.01f, 20.0f, 0.01f, 20.0f, 0.05f, 2, C::Log, false, false, C::LfoRate, false },
+        { "lfo6Rate", "LFO 6", "Hz", 0.01f, 20.0f, 0.01f, 20.0f, 0.15f, 2, C::Log, false, false, C::LfoRate, false },
+        { "lfo7Rate", "LFO 7", "Hz", 0.01f, 20.0f, 0.01f, 20.0f, 2.00f, 2, C::Log, false, false, C::LfoRate, false },
+        { "lfo8Rate", "LFO 8", "Hz", 0.01f, 20.0f, 0.01f, 20.0f, 6.00f, 2, C::Log, false, false, C::LfoRate, false },
     };
     return specs;
+}
+
+inline const ControlSpec* findSpec (const juce::String& id)
+{
+    for (const auto& c : controlSpecs()) if (id == c.id) return &c;
+    return nullptr;
 }
 
 struct ToggleSpec { const char* id; const char* label; bool def; };
@@ -50,6 +91,50 @@ inline const std::vector<ToggleSpec>& toggleSpecs()
     };
     return specs;
 }
+
+// ------------------------------------------------------------- LFO shapes
+
+enum LfoShape { Sine, Triangle, SawUp, SawDown, Square, SampleHold, Wander, kNumShapes };
+
+inline juce::StringArray lfoShapeNames()
+{
+    return { "SINE", "TRIANGLE", "SAW UP", "SAW DOWN", "SQUARE", "S&H", "WANDER" };
+}
+
+inline const int kDefaultShapes[kNumLfos] = { Sine, Triangle, Wander, Sine, SawUp, Wander, SampleHold, Sine };
+
+inline juce::String lfoRateId (int i)  { return "lfo" + juce::String (i + 1) + "Rate"; }
+inline juce::String lfoShapeId (int i) { return "lfo" + juce::String (i + 1) + "Shape"; }
+
+// ----------------------------------------------------- modulation targets
+
+/** Everything an LFO can drive, in a fixed order the DSP code uses directly. */
+enum Target
+{
+    tStretch, tPitch, tWeave, tScatter, tDrift, tWindow,
+    tReverb, tGain, tAttack, tRelease,
+    tFxMix, tFxX, tFxY, tChRate, tChDepth, tEchoTime, tEchoFb, tEchoTone,
+    tFltCut, tFltRes, tFltType, tSpBlur, tSpShift, tSpThin,
+    kNumTargets
+};
+
+inline const char* targetParamId (int t)
+{
+    static const char* ids[kNumTargets] = {
+        "stretch", "pitch", "weave", "scatter", "drift", "window",
+        "reverb", "gain", "attack", "release",
+        "fxMix", "fxX", "fxY", "chRate", "chDepth", "echoTime", "echoFb", "echoTone",
+        "fltCut", "fltRes", "fltType", "spBlur", "spShift", "spThin" };
+    return ids[t];
+}
+
+inline int targetForParam (const juce::String& id)
+{
+    for (int t = 0; t < kNumTargets; ++t) if (id == targetParamId (t)) return t;
+    return -1;
+}
+
+// ------------------------------------------------------- slider mapping
 
 /** Slider position (0..1) ↔ value, using the slider range. */
 inline double specToPos (const ControlSpec& c, double v)
@@ -98,6 +183,19 @@ inline juce::NormalisableRange<float> specRange (const ControlSpec& c)
     return { lo, hi, c.integer ? 1.0f : 0.0f };
 }
 
+/** Host-visible name: FX parameters get their effect as prefix (CUTOFF → FILTER CUTOFF). */
+inline juce::String hostName (const ControlSpec& c)
+{
+    const juce::String id (c.id);
+    if (id.startsWith ("ch")) return "CHORUS " + juce::String (c.label);
+    if (id.startsWith ("echo")) return "ECHO " + juce::String (c.label);
+    if (id.startsWith ("flt")) return "FILTER " + juce::String::fromUTF8 (c.label);
+    if (id.startsWith ("sp")) return "SPECTRAL " + juce::String (c.label);
+    if (id == "fxX") return "FX X";
+    if (id == "fxY") return "FX Y";
+    return juce::String::fromUTF8 (c.label);
+}
+
 inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
@@ -106,13 +204,17 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         auto attrs = juce::AudioParameterFloatAttributes()
                          .withLabel (c.unit)
                          .withStringFromValueFunction ([dec = c.decimals] (float v, int) { return juce::String (v, dec); });
+        const auto name = hostName (c);
         if (c.integer)
-            layout.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { c.id, 1 }, c.label, (int) c.pMin, (int) c.pMax, (int) c.def));
+            layout.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { c.id, 1 }, name, (int) c.pMin, (int) c.pMax, (int) c.def));
         else
-            layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { c.id, 1 }, c.label, specRange (c), c.def, attrs));
+            layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { c.id, 1 }, name, specRange (c), c.def, attrs));
     }
     for (const auto& t : toggleSpecs())
         layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { t.id, 1 }, juce::String::fromUTF8 (t.label), t.def));
+    for (int i = 0; i < kNumLfos; ++i)
+        layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { lfoShapeId (i), 1 },
+                                                                   "LFO " + juce::String (i + 1) + " SHAPE", lfoShapeNames(), kDefaultShapes[i]));
     return layout;
 }
 

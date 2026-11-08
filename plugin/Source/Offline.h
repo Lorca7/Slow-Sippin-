@@ -15,6 +15,8 @@
 
 #include "StretchEngine.h"
 #include "SampleData.h"
+#include "Modulation.h"
+#include "Effects.h"
 #include <atomic>
 
 namespace ss
@@ -64,6 +66,14 @@ struct OfflineSettings
     StreamSettings stream;
     float reverbPct = 0, sizeSec = 2.5f, gainDb = 0;
     bool normalize = true;
+
+    // effects + modulation (export renders what you hear)
+    std::array<float, kNumTargets> base {};    // every modulatable parameter, in its own units
+    float lfoRate[kNumLfos] {};
+    int lfoShape[kNumLfos] {};
+    RouteList routes {};
+    const ModSystem* mod = nullptr;            // ranges only
+    float preGain = 1;                         // live NORMALIZE level, so the effects see the same level
 };
 
 class Analyzer : private juce::Thread
