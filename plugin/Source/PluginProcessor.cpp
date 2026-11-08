@@ -296,6 +296,7 @@ void SlowSippinProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         }
     }
     outLevel.store (juce::jmax (blockPeak, outLevel.load() * 0.9f));
+    recorder.process (L, R, n);            // exactly what is heard, after everything
     clock += n;
     audioClock.store (clock);
 }

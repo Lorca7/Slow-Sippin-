@@ -130,6 +130,7 @@ private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override { repaint(); }
     void openSample();
+    void toggleRecording();
     void startExport();
     void setStatus (const juce::String& s, bool error = false, int holdMs = 5000);
     void showTab (int t);
@@ -141,6 +142,7 @@ private:
 
     SlowSippinProcessor& proc;
     ss::Look look;
+    juce::TextButton recBtn { "REC" };
     juce::TextButton loadBtn { "+ SAMPLE" }, auditionBtn { "AUDITION" }, playBtn { "PLAY" }, stopBtn { "STOP" }, exportBtn { "RENDER & SAVE" };
     juce::ComboBox fmtBox, bitsBox;
     ss::SourceWave source;

@@ -5,10 +5,12 @@
  * plus the file exporter.   Usage: HostTest <plugin.vst3> <sample.wav> <outdir>
  */
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <thread>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../Source/Offline.h"
 #include "../Source/Params.h"
+#include "../Source/Recorder.h"
 
 static int failures = 0;
 static void check (bool ok, const juce::String& what)
@@ -393,6 +395,53 @@ int main (int argc, char** argv)
             ex.start (os, f, fmt, bits);
             while (ex.isBusy()) juce::Thread::sleep (20);
             check (ex.state() == ss::Exporter::Done && f.getSize() > 1000, juce::String (name) + ": " + ex.message());
+        }
+    }
+
+    std::printf ("live recorder (REC button):\n");
+    for (int bits : { 24, 32 })
+    {
+        ss::Recorder rec;
+        const auto f = outDir.getChildFile ("Slow Sippin Recordings").getChildFile ("take" + juce::String (bits) + ".wav");
+        juce::String e;
+        const double sr = 48000;
+        check (rec.start (f, sr, bits, e), "start " + juce::String (bits) + "-bit " + e);
+        // an "audio thread" pushing 3 s in 256-sample blocks, in real time-ish bursts
+        const int total = (int) (3 * sr), block = 256;
+        std::thread audio ([&]
+        {
+            std::vector<float> l ((size_t) block), r ((size_t) block);
+            for (int p = 0; p < total; p += block)
+            {
+                for (int i = 0; i < block; ++i)
+                {
+                    l[(size_t) i] = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 330.0 * (p + i) / sr);
+                    r[(size_t) i] = -l[(size_t) i];
+                }
+                rec.process (l.data(), r.data(), std::min (block, total - p));
+                if ((p / block) % 64 == 0) juce::Thread::sleep (1);
+            }
+        });
+        audio.join();
+        const double secs = rec.seconds();
+        const auto out = rec.stop();
+        check (out == f && f.existsAsFile(), "file written: " + f.getFileName() + " (" + juce::String (secs, 2) + " s, dropped " + juce::String (rec.droppedSamples()) + ")");
+        juce::AudioFormatManager fm2;
+        fm2.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> rd (fm2.createReaderFor (f));
+        check (rd != nullptr && rd->numChannels == 2 && (int) rd->lengthInSamples == total && rd->sampleRate == sr && (int) rd->bitsPerSample == bits,
+               "reads back: " + (rd ? juce::String (rd->lengthInSamples) + " frames, " + juce::String (rd->bitsPerSample) + "-bit, " + juce::String (rd->sampleRate) + " Hz" : juce::String ("unreadable")));
+        if (rd != nullptr)
+        {
+            juce::AudioBuffer<float> b (2, total);
+            rd->read (&b, 0, total, 0, true, true);
+            double err = 0;
+            for (int i = 0; i < total; ++i)
+            {
+                const double want = 0.5 * std::sin (2.0 * juce::MathConstants<double>::pi * 330.0 * i / sr);
+                err = juce::jmax (err, std::abs (b.getSample (0, i) - want), std::abs (b.getSample (1, i) + want));
+            }
+            check (err < (bits == 32 ? 1e-6 : 1e-5), "content matches exactly (max error " + juce::String (err, 8) + ")");
         }
     }
 

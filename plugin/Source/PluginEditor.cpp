@@ -522,6 +522,10 @@ SlowSippinEditor::SlowSippinEditor (SlowSippinProcessor& p)
     juce::LookAndFeel::setDefaultLookAndFeel (&look);
 
     exportBtn.getProperties().set ("primary", true);
+    recBtn.getProperties().set ("rec", false);
+    recBtn.onClick = [this] { toggleRecording(); };
+    recBtn.setTooltip ("Record what you hear, live, to a WAV file (press again to stop and save)");
+    addAndMakeVisible (recBtn);
     for (auto* b : { &loadBtn, &auditionBtn, &playBtn, &stopBtn, &exportBtn }) addAndMakeVisible (b);
     loadBtn.onClick = [this] { openSample(); };
     auditionBtn.onClick = [this] { proc.toggleAudition(); };
@@ -738,6 +742,7 @@ void SlowSippinEditor::resized()
         auto h = header.reduced (40, 0);
         const int x = h.getX() + juce::jmax (500, (int) (h.getWidth() * 0.40f));
         loadBtn.setBounds (x, h.getCentreY() - 21, 140, 42);
+        recBtn.setBounds (loadBtn.getRight() + 12, h.getCentreY() - 21, 150, 42);
     }
 
     {
@@ -868,7 +873,16 @@ void SlowSippinEditor::paint (juce::Graphics& g)
     g.setFont (Fonts::mono (11.5f));
     g.drawText (U8 ("textures · pads · drones"), h.getX() + (int) tw + 30, h.getCentreY(), 240, 16, juce::Justification::centredLeft);
 
-    const int infoX = loadBtn.getRight() + 22;
+    const int infoX = recBtn.getRight() + 22;
+    if (proc.recorder.isRecording())
+    {
+        // level meter under the REC button while recording
+        const auto rb = recBtn.getBounds();
+        g.setColour (Colours::faint);
+        g.fillRect (rb.getX(), rb.getBottom() + 4, rb.getWidth(), 3);
+        g.setColour (Colours::red);
+        g.fillRect ((float) rb.getX(), (float) rb.getBottom() + 4.0f, rb.getWidth() * juce::jlimit (0.0f, 1.0f, proc.recorder.level()), 3.0f);
+    }
     const int statusW = juce::jlimit (90, 360, (int) juce::GlyphArrangement::getStringWidth (Fonts::mono (12.0f), statusShown) + 30);
     auto statusR = juce::Rectangle<int> (h.getRight() - statusW, h.getY(), statusW, h.getHeight());
     auto d = proc.getSample();
@@ -1011,6 +1025,16 @@ void SlowSippinEditor::timerCallback()
     auto d = proc.getSample();
     const bool busy = proc.exporter.isBusy();
     exportBtn.setButtonText (busy ? "CANCEL" : "RENDER & SAVE");
+    {
+        const bool rec = proc.recorder.isRecording();
+        recBtn.getProperties().set ("rec", rec);
+        recBtn.getProperties().set ("primary", rec);
+        const double t = proc.recorder.seconds();
+        const int m = (int) (t / 60.0);
+        const double sec = t - m * 60.0;
+        recBtn.setButtonText (rec ? juce::String (m) + ":" + (sec < 10 ? "0" : "") + juce::String (sec, 1) : juce::String ("REC"));
+        recBtn.repaint();
+    }
     exportBtn.setEnabled (d != nullptr || busy);
     playBtn.setEnabled (d != nullptr);
     stopBtn.setEnabled (d != nullptr);
@@ -1035,6 +1059,7 @@ void SlowSippinEditor::timerCallback()
     else if (busy) now = "rendering file " + juce::String (juce::roundToInt (proc.exporter.progress() * 100)) + "%";
     else if (proc.isLoading()) now = "loading...";
     else if (proc.getLoadError().isNotEmpty()) { now = proc.getLoadError(); err = true; }
+    else if (proc.recorder.isRecording()) now = "recording";
     else if (proc.isPlaying()) now = "playing";
     else if (d != nullptr) now = "ready";
     else now = "idle";
@@ -1070,6 +1095,48 @@ void SlowSippinEditor::filesDropped (const juce::StringArray& files, int, int)
     for (auto& f : files)
         if (isAudioFile (f)) { proc.loadSample (juce::File (f)); break; }
     repaint();
+}
+
+void SlowSippinEditor::toggleRecording()
+{
+    if (! proc.recorder.isRecording())
+    {
+        const double sr = proc.getSampleRate();
+        if (sr <= 0) { setStatus ("audio isn't running - check the audio device", true, 6000); return; }
+        const auto dir = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Slow Sippin Recordings");
+        const auto name = "Slow Sippin " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S") + ".wav";
+        juce::String err;
+        const int bits = bitsBox.getSelectedId() > 0 ? bitsBox.getSelectedId() : 24;
+        if (! proc.recorder.start (dir.getChildFile (name), sr, bits, err)) { setStatus ("can't record: " + err, true, 8000); return; }
+        setStatus ("recording - press the button again to stop", false, 3000);
+        return;
+    }
+
+    const auto dropped = proc.recorder.droppedSamples();
+    const auto seconds = proc.recorder.seconds();
+    const auto recorded = proc.recorder.stop();
+    if (recorded == juce::File() || ! recorded.existsAsFile()) { setStatus ("nothing was recorded", true, 5000); return; }
+    if (dropped > 0) setStatus ("recording had gaps (disk too slow)", true, 8000);
+
+    // the take is already safe on disk; let the user choose where it goes
+    chooser = std::make_unique<juce::FileChooser> ("Save recording (" + juce::String (seconds, 1) + " s)", recorded, "*.wav");
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
+                          [this, recorded] (const juce::FileChooser& fc)
+                          {
+                              auto f = fc.getResult();
+                              if (f == juce::File())
+                              {
+                                  setStatus ("recording kept: Music/Slow Sippin Recordings/" + recorded.getFileName(), false, 9000);
+                                  return;
+                              }
+                              if (! f.hasFileExtension ("wav")) f = f.withFileExtension ("wav");
+                              if (f != recorded && ! recorded.moveFileTo (f))
+                              {
+                                  setStatus ("couldn't save there - kept in Music/Slow Sippin Recordings", true, 9000);
+                                  return;
+                              }
+                              setStatus ("saved " + f.getFileName(), false, 7000);
+                          });
 }
 
 void SlowSippinEditor::openSample()

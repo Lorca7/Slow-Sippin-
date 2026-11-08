@@ -33,6 +33,18 @@ There's no Render step: the stretch is computed live, so every control can be ch
   - Renders can be any length up to **12 hours**. They stream to disk, so an hour-long file needs very little memory, but it does need free disk space: about 2.5 GB for an hour of 24-bit stereo at 48 kHz, freed again once the file is saved.
   - WAV files over 4 GB are written as RF64. AIFF can't exceed 4 GB, so use WAV for very long 32-bit renders.
 
+### Recording what you hear (REC)
+
+The **● REC** button at the top records Slow Sippin's output live: everything you hear, including pad moves, knob tweaks, LFOs, MIDI notes and Audition.
+
+- **While recording:** the button turns red and shows the running time, with a level meter underneath.
+- **To stop:** press it again. A Save dialog asks where to put the WAV.
+- **Format:** the bit depth follows the footer's selector (16, 24 or 32-bit float), at the session's sample rate.
+- **Takes are never lost.** Recording goes straight to disk in **Music/Slow Sippin Recordings**. If you cancel the Save dialog, or close the plugin mid-take, the file stays there.
+- **No glitches:** disk writing happens on a background thread, so recording can't cause clicks or dropouts.
+
+Render & Save, by contrast, renders the fixed one-shot (region × stretch) offline. Use REC to capture a performance.
+
 ### Controls
 
 | | |
@@ -116,6 +128,7 @@ Every push that touches `plugin/` runs `.github/workflows/build-mac.yml` on a ma
 - `Source/ModUI.h`: LFO tiles, route chips and the XY pad. `makeFxParams` in `Source/Offline.h` applies the pad's axis mapping, so playback and export use the same rules.
 - `Source/VoiceEngine.*` holds the 8 polyphonic voices. Each voice renders about 100 ms ahead on background threads into a lock-free FIFO, so the bursty FFT work never lands on the audio thread.
 - `Source/Offline.*` contains the Normalize analyzer, the file export and the WAV/AIFF writer.
+- `Source/Recorder.h`: the REC button's live recorder: lock-free FIFO, background disk thread, WAV/RF64.
 - `Source/PluginProcessor.*` handles parameters, MIDI, transport, audition, reverb, the limiter and saved state. `Source/PluginEditor.*` and `Source/Look.h` are the UI.
 
 JUCE is used under its AGPLv3 / commercial licence terms. The fonts (Archivo, IBM Plex Mono) are under the SIL Open Font License; see `Resources/fonts`.

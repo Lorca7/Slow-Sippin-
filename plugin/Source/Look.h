@@ -111,9 +111,26 @@ public:
     {
         const bool primary = b.getProperties()["primary"];
         const float a = b.isEnabled() ? 1.0f : 0.35f;
-        g.setColour ((primary ? Colours::redInk : b.getToggleState() ? Colours::bg : Colours::ink).withMultipliedAlpha (a));
+        const auto textCol = (primary ? Colours::redInk : b.getToggleState() ? Colours::bg : Colours::ink).withMultipliedAlpha (a);
         g.setFont (Fonts::sans (13.0f, Fonts::SemiBold, 0.13f));
-        g.drawText (b.getButtonText(), b.getLocalBounds(), juce::Justification::centred);
+        auto area = b.getLocalBounds();
+        if (b.getProperties().contains ("rec"))
+        {
+            // record icon: red dot when idle, square (stop) while recording
+            const bool recording = b.getProperties()["rec"];
+            const float tw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), b.getButtonText());
+            const float total = 12.0f + 8.0f + tw;
+            const float x0 = (float) area.getCentreX() - total * 0.5f, cy = (float) area.getCentreY();
+            g.setColour (recording ? Colours::redInk : Colours::red);
+            if (recording) g.fillRect (x0, cy - 5.5f, 11.0f, 11.0f);
+            else g.fillEllipse (x0, cy - 6.0f, 12.0f, 12.0f);
+            area = area.withTrimmedLeft ((int) (x0 + 20.0f)).withWidth ((int) tw + 4);
+            g.setColour (textCol);
+            g.drawText (b.getButtonText(), area, juce::Justification::centredLeft);
+            return;
+        }
+        g.setColour (textCol);
+        g.drawText (b.getButtonText(), area, juce::Justification::centred);
     }
 
     // ---- toggles: red square + bold label

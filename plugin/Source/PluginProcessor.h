@@ -7,6 +7,7 @@
 #include "Offline.h"
 #include "Effects.h"
 #include "Modulation.h"
+#include "Recorder.h"
 
 class SlowSippinProcessor : public juce::AudioProcessor,
                             public juce::ChangeBroadcaster,
@@ -63,6 +64,7 @@ public:
     ss::OfflineSettings offlineSettings() const;
     ss::FxSetup currentFxSetup() const noexcept;
     ss::Exporter exporter;
+    ss::Recorder recorder;                     // live recording of the output (REC button)
     int exportFormat = 0, exportBits = 24;     // remembered with the session
     int uiTab = 0;                             // ENGINE / EFFECTS, remembered with the session
 
